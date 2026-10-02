@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reportes</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#262d38; --ink:#e6edf3; --muted:#8b96a5;
+    --accent:#ff7a1a; --ok:#2ea043; --warn:#d29922; --bad:#f0503a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.45 ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif}
+  header{display:flex;align-items:center;gap:14px;padding:14px 20px;background:var(--panel);
+         border-bottom:1px solid var(--line);flex-wrap:wrap}
+  header h1{font-size:17px;margin:0;font-weight:650}
+  .spacer{flex:1}
+  header a,select{color:var(--ink);background:#20262f;border:1px solid var(--line);
+       border-radius:9px;padding:7px 13px;font-size:13px;text-decoration:none;cursor:pointer}
+  main{padding:18px;max-width:1080px;margin:0 auto}
+  .tiles{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin-bottom:18px}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:15px}
+  .tile .k{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+  .tile .v{font-size:27px;font-weight:700;margin-top:6px;letter-spacing:-.02em;
+           font-variant-numeric:tabular-nums}
+  .tile .s{font-size:12.5px;color:var(--muted);margin-top:3px}
+  .v.good{color:var(--ok)} .v.bad{color:var(--bad)} .v.warn{color:var(--warn)}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:15px}
+  .panel h2{margin:0 0 12px;font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+  .row{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;
+       padding:7px 0;border-bottom:1px solid var(--line)}
+  .row:last-child{border-bottom:0}
+  .row .n{font-variant-numeric:tabular-nums;font-weight:650}
+  .bar{height:6px;border-radius:4px;background:#20262f;overflow:hidden;margin-top:5px}
+  .bar i{display:block;height:100%;background:var(--accent)}
+  .empty{color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Reportes</h1>
+  <span class="spacer"></span>
+  <select id="days" onchange="draw()">
+    <option value="1">Hoy</option>
+    <option value="7">Últimos 7 días</option>
+    <option value="30">Últimos 30 días</option>
+  </select>
+  <a href="/kitchen">Cocina</a>
+</header>
+<main>
+  <div class="tiles" id="tiles"></div>
+  <div class="grid">
+    <section class="panel"><h2>Más vendidos</h2><div id="top"></div></section>
+    <section class="panel"><h2>Cómo pagaron</h2><div id="pay"></div></section>
+    <section class="panel"><h2>Recoge vs domicilio</h2><div id="ful"></div></section>
+    <section class="panel"><h2>Pedidos que no se concretaron</h2><div id="lost"></div></section>
+  </div>
+</main>
+<script>
+const money = n => '$' + (n||0).toLocaleString('es-CO');
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const LOST = {CANCELLED:'Cancelados', REJECTED:'Rechazados por el local', EXPIRED:'Vencidos sin respuesta'};
+const METODO = {CASH:'Efectivo', TRANSFER:'Transferencia', MIXED:'Mixto', UNSPECIFIED:'Sin especificar'};
+
+function tile(k, v, s, cls){
+  return `<div class="tile"><div class="k">${k}</div>
+          <div class="v ${cls||''}">${v}</div>${s ? `<div class="s">${s}</div>` : ''}</div>`;
+}
+function bars(rows, labelKey, valueKey, fmt){
+  if(!rows.length) return '<div class="empty">Sin datos todavía</div>';
+  const max = Math.max(...rows.map(r => r[valueKey])) || 1;
+  return rows.map(r => `<div class="row"><div>${esc(r[labelKey])}
+      <div class="bar"><i style="width:${Math.round(r[valueKey]/max*100)}%"></i></div></div>
+      <div class="n">${fmt(r)}</div></div>`).join('');
+}
+
+async function draw(){
+  const days = document.getElementById('days').value;
+  const d = await (await fetch('/api/report?days=' + days)).json();
+
+  document.getElementById('tiles').innerHTML =
+      tile('Ventas', money(d.revenue), d.orders + ' pedidos')
+    + tile('Ticket promedio', money(d.average_ticket))
+    + tile('Domicilios cobrados', money(d.delivery_fees))
+    + tile('Sin confirmar', money(d.pending_amount),
+           d.pending_orders + ' pedidos esperando el sí del cliente',
+           d.pending_orders ? 'warn' : '')
+    + tile('Comprobantes por confirmar', d.receipts_awaiting_confirmation, 'esperan al encargado',
+           d.receipts_awaiting_confirmation ? 'warn' : '')
+    + tile('Comprobantes marcados', d.receipts_flagged, 'no cuadraron',
+           d.receipts_flagged ? 'bad' : 'good');
+
+  document.getElementById('top').innerHTML =
+    bars(d.top_items, 'name', 'units', r => r.units + ' · ' + money(r.revenue));
+
+  document.getElementById('pay').innerHTML = d.by_method.length
+    ? d.by_method.map(m => `<div class="row"><div>${esc(METODO[m.method] || m.method)}</div>
+        <div class="n">${m.method === 'UNSPECIFIED' ? m.n : m.n + ' · ' + money(m.transfer + m.cash)}</div></div>`).join('')
+    : '<div class="empty">Sin datos todavía</div>';
+
+  document.getElementById('ful').innerHTML = d.fulfilment.length
+    ? d.fulfilment.map(f => `<div class="row">
+        <div>${f.type === 'DELIVERY' ? 'Domicilio' : 'Recoge en tienda'}</div>
+        <div class="n">${f.n} · ${money(f.revenue)}</div></div>`).join('')
+    : '<div class="empty">Sin datos todavía</div>';
+
+  const lost = Object.entries(LOST).map(([k, label]) => ({label, n: d.by_state[k] || 0}))
+                     .filter(r => r.n > 0);
+  document.getElementById('lost').innerHTML = lost.length
+    ? lost.map(r => `<div class="row"><div>${r.label}</div><div class="n">${r.n}</div></div>`).join('')
+    : '<div class="empty">Ninguno. Todos los pedidos avanzaron.</div>';
+}
+
+fetch('/api/config').then(r => r.json()).then(c => {
+  document.getElementById('title').textContent = c.business.name + ' · Reportes';
+  document.title = c.business.short_name + ' · Reportes';
+});
+draw(); setInterval(draw, 4000);
+</script>
+</body>
+</html>

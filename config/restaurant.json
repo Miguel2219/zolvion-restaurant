@@ -1,0 +1,102 @@
+{
+  "_comment": "Menu and prices taken from the Caseritas source in NotebookLM (WhatsApp Image 2026-09-18 PDF). VERIFY the prices with your cousin before the demo. Delivery zones, hours and payment accounts are TEST VALUES - the source does not contain them.",
+  "business": {
+    "name": "Caseritas Burger",
+    "short_name": "Caseritas",
+    "city": "Bucaramanga",
+    "currency": "COP",
+    "timezone": "America/Bogota",
+    "persona": "Eres el asistente de pedidos de Caseritas Burger, una hamburguesería artesanal y casera de Bucaramanga. Hablas como un santandereano: cercano, breve, sin exagerar. Tratas de usted. Todas las hamburguesas ya vienen con papas a la francesa y salsa de la casa incluidas: recuérdaselo al cliente si pregunta por papas."
+  },
+  "hours": {
+    "open": "17:00",
+    "close": "23:00",
+    "open_days": [0, 1, 2, 3, 4, 5, 6],
+    "closed_message": "Por ahora estamos cerrados. Abrimos todos los días de 5:00 p.m. a 11:00 p.m."
+  },
+  "fulfilment": {
+    "pickup": true,
+    "delivery": true,
+    "default_delivery_fee": 6000,
+    "delivery_zones": [
+      { "name": "Cabecera", "fee": 5000 },
+      { "name": "Sotomayor", "fee": 5000 },
+      { "name": "Provenza", "fee": 6000 },
+      { "name": "Centro", "fee": 6000 },
+      { "name": "Floridablanca", "fee": 8000 },
+      { "name": "Girón", "fee": 9000 }
+    ]
+  },
+  "payments": {
+    "methods": ["CASH", "TRANSFER", "MIXED"],
+    "proof_clock_skew_minutes": 2,
+    "proof_notice_minutes": 5,
+    "accounts": [
+      {
+        "provider": "Nequi",
+        "number": "3138587389",
+        "holder": "Miguel Paba"
+      }
+    ]
+  },
+  "menu": {
+    "categories": [
+      {
+        "id": "burgers",
+        "name": "Hamburguesas",
+        "items": [
+          {
+            "id": "b_caserita",
+            "name": "Caserita",
+            "price": 18900,
+            "available": true,
+            "description": "Pan brioche, carne 120g, queso fresco, jamón ahumado, tocineta, lechuga, tomate, cebolla (cruda o grille), papas a la francesa y salsa de la casa"
+          },
+          {
+            "id": "b_madurita",
+            "name": "Caserita Madurita",
+            "price": 21900,
+            "available": true,
+            "description": "Pan brioche, carne 120g, maduro frito, queso fresco, jamón ahumado, tocineta, lechuga, tomate, cebolla (cruda o grille), papas a la francesa y salsa de la casa"
+          },
+          {
+            "id": "b_doble_pechuga",
+            "name": "Caserita Doble con Pechuga",
+            "price": 24900,
+            "available": true,
+            "description": "Pan brioche, carne 120g, 90g de pollo desmechado bañado en tártara, queso fresco, jamón ahumado, tocineta, lechuga, tomate, cebolla (cruda o grille), papas a la francesa y salsa de la casa"
+          },
+          {
+            "id": "b_especial",
+            "name": "Caserita Especial",
+            "price": 29900,
+            "available": true,
+            "description": "Pan brioche, pollo (desmechado o a la plancha) 90g, queso fresco, jamón ahumado, tocineta, lechuga, tomate, cebolla (cruda o grille), papas a la francesa y salsa de la casa"
+          }
+        ]
+      },
+      {
+        "id": "drinks",
+        "name": "Bebidas",
+        "items": [
+          { "id": "d_gaseosa_personal", "name": "Gaseosa personal", "price": 3500, "available": true, "description": "" },
+          { "id": "d_gaseosa_mini",     "name": "Gaseosa mini",     "price": 2500, "available": true, "description": "" },
+          { "id": "d_gaseosa_litro",    "name": "Gaseosa litro",    "price": 7000, "available": true, "description": "Para compartir" },
+          { "id": "d_soda_personal",    "name": "Soda personal",    "price": 3500, "available": true, "description": "" },
+          { "id": "d_cerveza_nacional", "name": "Cerveza nacional", "price": 5000, "available": true, "description": "" },
+          { "id": "d_cerveza_premium",  "name": "Cerveza premium",  "price": 7000, "available": true, "description": "" }
+        ]
+      }
+    ],
+    "modifiers": [
+      { "id": "m_salsa",   "name": "Tarro de salsa", "price": 1000, "applies_to": ["burgers"] },
+      { "id": "m_queso",   "name": "Queso",          "price": 2000, "applies_to": ["burgers"] },
+      { "id": "m_huevo",   "name": "Huevo",          "price": 2000, "applies_to": ["burgers"] },
+      { "id": "m_cheddar", "name": "Queso cheddar",  "price": 3000, "applies_to": ["burgers"] },
+      { "id": "m_jalapenos", "name": "Jalapeños",    "price": 4000, "applies_to": ["burgers"] },
+      { "id": "m_sin_cebolla", "name": "Sin cebolla", "price": 0,   "applies_to": ["burgers"] },
+      { "id": "m_sin_tomate",  "name": "Sin tomate",  "price": 0,   "applies_to": ["burgers"] },
+      { "id": "m_cebolla_grille", "name": "Cebolla grille", "price": 0, "applies_to": ["burgers"] }
+    ]
+  }
+}

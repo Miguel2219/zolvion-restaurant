@@ -1,0 +1,511 @@
+"""The whole demo in one process: webhook in, kitchen and reports out.
+
+This is deliberately not the real architecture. No queue, no worker, no AWS —
+the real design lives in the zolvion-restaurant repo. This file exists to make a
+convincing six-minute demo, nothing more."""
+
+import base64
+import uuid
+import os
+import sqlite3
+import traceback
+from pathlib import Path
+
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from . import brain, cart, db, handoff, orders, payments, reports, wa
+from .catalog import CATALOG, reload as reload_catalog
+from .money import fmt
+
+STATIC = Path(__file__).resolve().parent.parent / "static"
+
+app = FastAPI(title="Zolvion demo")
+db.init()
+
+
+@app.on_event("startup")
+def _startup_check() -> None:
+    """Say out loud what is and is not configured, before the first message
+    arrives instead of after it fails."""
+    key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+    lines = [
+        "",
+        "  " + CATALOG.business["name"] + "  —  demo",
+        f"  Anthropic key : {'OK' if key else 'FALTA  -> revisa .env y reinicia'}",
+        f"  WhatsApp      : {'conectado' if wa.live() else 'modo simulador'}",
+        f"  Firma webhook : {'verificando' if wa.app_secret() else 'sin APP_SECRET (no verifica)'}",
+        "",
+        "  Simulador  http://localhost:8000/simulator",
+        "  Cocina     http://localhost:8000/kitchen",
+        "  Reportes   http://localhost:8000/reports",
+        "",
+    ]
+    print("\n".join(lines), flush=True)
+
+
+# ---- customer-facing notifications ----------------------------------
+
+# notifications-and-followups.md §1. Exactly these states, and nothing else.
+# No COMPLETED, no READY on a delivery order (OUT_FOR_DELIVERY carries it), and
+# no CANCELLED when the customer did it themselves.
+# The internal order code never appears here: it is for staff.
+NOTIFY = {
+    "ACCEPTED": "¡Recibimos su pedido! En un momento entra en preparación.",
+    "READY": "Su pedido ya está listo para recoger.",
+    "OUT_FOR_DELIVERY": "Su pedido va en camino.",
+}
+
+STOP_FALLBACK = {
+    "REJECTED": "Lo sentimos, no pudimos tomar su pedido en este momento. {reason}",
+    "CANCELLED": "Tuvimos que cancelar su pedido. {reason}",
+}
+
+
+def _stop_message(order: dict, reason: str | None) -> str:
+    """REJECTED and staff CANCELLED are mandatory messages, and a bare 'your
+    order was cancelled' is not good enough. The model turns the staff's own
+    words into something a customer can read, and falls back to a template if
+    the model is unreachable."""
+    kind = "rechazado" if order["state"] == "REJECTED" else "cancelado por el local"
+    clean = (reason or "").strip()
+    try:
+        return brain.reply(order["phone"], (
+            f"(El local {kind} el pedido del cliente. Motivo que escribió el personal: "
+            f"\"{clean or 'sin motivo indicado'}\". Escríbele al cliente un mensaje corto, "
+            "amable y claro explicándole el motivo en palabras sencillas, y discúlpate. "
+            "No le menciones ningún código de pedido. No inventes un motivo distinto. "
+            "Si aplica, ofrécele hacer otro pedido.)"
+        ))
+    except Exception:  # noqa: BLE001 - the customer must be told either way
+        traceback.print_exc()
+        template = STOP_FALLBACK[order["state"]]
+        return template.format(reason=clean and f"Motivo: {clean}" or "").strip()
+
+
+DISCARD_TEMPLATE = (
+    "Revisamos el comprobante que nos envió y no lo tomamos como pago. Motivo: {reason}"
+)
+
+# The model's discard message is sent only if it contains none of these: it must
+# not confirm a payment, write an amount, or show the order code / "cocina".
+DISCARD_FORBIDDEN = ("confirmad", "cocina", "$")
+
+
+def _discard_message(order: dict, reason: str) -> str:
+    """Staff discarded a receipt (it is not a payment). Like _stop_message, the
+    model turns the staff's own reason into a short, kind message, and a fixed
+    template is used if the model fails - or if what it wrote trips the guard.
+    The template only quotes the staff's reason."""
+    template = DISCARD_TEMPLATE.format(reason=reason)
+    try:
+        text = brain.reply(order["phone"], (
+            "(Una persona del local descartó un comprobante que envió el cliente: no cuenta "
+            "como pago y ya no está en revisión. Motivo que escribió el personal: "
+            f"\"{reason}\". Escríbele al cliente un mensaje corto y amable explicándole el "
+            "motivo en palabras sencillas. No inventes un motivo distinto. No le digas que "
+            "algún pago está confirmado. No escribas montos ni el signo $. Si el ESTADO REAL "
+            "dice que todavía falta por transferir, puedes recordarle que falta, sin decir "
+            "cuánto. No le menciones ningún código de pedido.)"
+        ))
+    except Exception:  # noqa: BLE001 - the customer must be told either way
+        traceback.print_exc()
+        return template
+    low = text.lower()
+    if order["code"].lower() in low or any(word in low for word in DISCARD_FORBIDDEN):
+        brain.correct_last_reply(order["phone"], template)   # the history says what was sent
+        return template
+    return text
+
+
+def notify(order: dict, reason: str | None = None) -> None:
+    state = order["state"]
+
+    if state in ("REJECTED", "CANCELLED"):
+        # A customer who cancelled already knows. Only the restaurant's own
+        # stops are announced (notifications-and-followups.md §1).
+        if state == "CANCELLED" and orders.last_actor(order["id"]) != "staff":
+            return
+        wa.send_text(order["phone"], _stop_message(order, reason))
+        return
+
+    if state == "READY" and order["fulfilment_type"] == "DELIVERY":
+        return
+
+    body = NOTIFY.get(state)
+    if body:
+        wa.send_text(order["phone"], body)
+
+
+# ---- one inbound message --------------------------------------------
+
+def handle(
+    phone: str, text: str | None, image: dict | None, received_at: str | None = None
+) -> str:
+    """Returns the reply text. Caller decides how to deliver it.
+
+    `received_at` is when the message actually arrived (both webhook handlers
+    stamp inbound_messages with it) - the reference point for the proof's date
+    check, so the OCR call's own latency never eats into the customer's window."""
+    if image is None:
+        return brain.reply(phone, text or "")
+
+    order = orders.latest_for(
+        phone,
+        ["PENDING_CONFIRMATION", "CONFIRMED", "ACCEPTED", "READY", "OUT_FOR_DELIVERY"],
+    )
+    if order is None:
+        return brain.reply(
+            phone,
+            [image, {"type": "text", "text": "(el cliente envió una imagen y no tiene pedido activo)"}],
+        )
+
+    extracted = brain.extract_proof(image)          # model: OCR only
+    src = image.get("source") or {}
+    photo = (
+        (base64.b64decode(src["data"]), src.get("media_type") or "image/jpeg")
+        if src.get("data") else None
+    )
+    record = payments.check_proof(
+        order["id"], extracted, photo=photo, received_at=received_at
+    )                                               # code: the verdict
+
+    if record["resent"]:
+        return brain.reply(phone, (
+            "(El cliente volvió a enviar un comprobante que ya habíamos recibido para este "
+            "pedido. Dile en una frase corta y amable que ese comprobante ya lo teníamos. "
+            "No le digas que el pago quedó confirmado. No le menciones ningún código de pedido.)"
+        ))
+
+    receipt = record["receipt"]
+    if receipt["status"] == "FLAGGED":
+        problems = " ".join(receipt["flags"])
+        return brain.reply(phone, (
+            f"(El sistema revisó el comprobante y encontró un problema: {problems} "
+            "Avísale al cliente con amabilidad, sin acusarlo, y dile que una persona del "
+            "local lo va a revisar. No digas que el pago quedó recibido. "
+            "No le menciones ningún código de pedido.)"
+        ))
+    # The receipt may have settled the method the bot was still asking about: say
+    # so, or the bot goes back to its open question.
+    amount = fmt(receipt["amount"])
+    method = ""
+    if record["inferred"] and record["method"] == "TRANSFER":
+        method = (
+            " El comprobante cubre el total: el pago quedó por transferencia por el "
+            f"total ({amount})."
+        )
+    elif record["inferred"]:
+        method = (
+            " El comprobante cubre una parte: el pago quedó en parte y parte, "
+            f"{fmt(record['transfer_amount'])} por transferencia."
+        )
+    resto = (
+        f" Quedan {fmt(record['cash_due'])} por pagar en efectivo al recibir."
+        if record["method"] in ("MIXED", "CASH") and record["cash_due"] > 0 else ""
+    )
+    return brain.reply(phone, (
+        f"(Mensaje del sistema, no del cliente. El sistema recibió el comprobante por {amount} "
+        f"y los datos cuadran; ya quedó registrado.{method}{resto} Dile al cliente que recibimos "
+        f"su comprobante por {amount} y que una persona del local lo va a revisar"
+        + (", y cómo quedó el pago" if method or resto else "")
+        + ". NO le digas que ya está confirmado. No le preguntes cómo va a pagar ni cuánto "
+        "por transferencia o en efectivo: eso ya quedó definido. "
+        "No le menciones ningún código de pedido.)"
+    ))
+
+
+# ---- WhatsApp webhook -----------------------------------------------
+
+@app.get("/webhook")
+def verify(request: Request):
+    params = request.query_params
+    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == wa.verify_token():
+        return Response(content=params.get("hub.challenge", ""), media_type="text/plain")
+    return Response(status_code=403)
+
+
+@app.post("/webhook")
+async def inbound(request: Request):
+    raw = await request.body()
+    if not wa.check_signature(raw, request.headers.get("x-hub-signature-256")):
+        return Response(status_code=403)          # rejected before any side effect
+
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return {"ok": True}
+
+    for message in wa.parse_webhook(payload):
+        wa_id = message.get("wa_message_id")
+        phone = message.get("phone")
+        if not wa_id or not phone:
+            continue
+        received_at = db.now()
+        try:
+            db.run(
+                "INSERT INTO inbound_messages(wa_message_id, phone, body, kind, received_at)"
+                " VALUES(?,?,?,?,?)",
+                (wa_id, phone, message.get("text"), message.get("kind", "text"), received_at),
+            )
+        except sqlite3.IntegrityError:
+            continue                              # duplicate delivery: exactly one row
+
+        image = None
+        if message.get("media_id"):
+            downloaded = wa.download_media(message["media_id"])
+            if downloaded:
+                image = wa.image_block(*downloaded)
+        try:
+            reply = handle(phone, message.get("text"), image, received_at)
+        except brain.NotConfigured as exc:
+            print(f"\n!! {exc}\n", flush=True)
+            reply = "Perdón, el sistema está en mantenimiento. Intente en unos minutos."
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+            reply = "Perdón, se me cruzaron los cables. ¿Me repite el pedido?"
+        wa.send_text(phone, reply)
+
+    return {"ok": True}
+
+
+# ---- browser simulator (Plan B) -------------------------------------
+
+@app.post("/sim/message")
+async def sim_message(request: Request):
+    body = await request.json()
+    phone = str(body.get("phone") or "573000000000")
+    text = body.get("text")
+    image = None
+    data_url = body.get("image")
+    if data_url:
+        header, _, encoded = data_url.partition(",")
+        mime = header.split(":", 1)[-1].split(";", 1)[0] or "image/jpeg"
+        image = wa.image_block(base64.b64decode(encoded), mime)
+
+    # Store it exactly like a real inbound message, so the conversation survives
+    # leaving the page. The image itself is not kept, only that one was sent.
+    received_at = db.now()
+    db.run(
+        "INSERT INTO inbound_messages(wa_message_id, phone, body, kind, received_at)"
+        " VALUES(?,?,?,?,?)",
+        (
+            f"sim-{uuid.uuid4().hex}", phone,
+            text or ("📎 comprobante" if image else ""),
+            "image" if image else "text", received_at,
+        ),
+    )
+    try:
+        reply = handle(phone, text, image, received_at)
+    except brain.NotConfigured as exc:
+        print(f"\n!! {exc}\n", flush=True)
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    except Exception as exc:  # noqa: BLE001
+        traceback.print_exc()
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    wa.send_text(phone, reply)
+    return {"reply": reply}
+
+
+@app.get("/sim/outbound")
+def sim_outbound(phone: str, after: int = 0):
+    rows = db.q(
+        "SELECT id, body, status, sent_at FROM outbound_messages"
+        " WHERE phone=? AND id>? ORDER BY id",
+        (phone, after),
+    )
+    return {"messages": [dict(r) for r in rows]}
+
+
+@app.get("/sim/conversation")
+def sim_conversation(phone: str):
+    """The whole thread, both directions. The simulator loads this on open, so
+    switching to the panel and coming back no longer loses what you typed."""
+    thread = [
+        {"role": "customer", "body": row["body"], "at": row["received_at"], "id": 0}
+        for row in db.q(
+            "SELECT body, received_at FROM inbound_messages WHERE phone=? ORDER BY rowid",
+            (phone,),
+        )
+    ] + [
+        {"role": "bot", "body": row["body"], "at": row["sent_at"], "id": row["id"]}
+        for row in db.q(
+            "SELECT id, body, sent_at FROM outbound_messages WHERE phone=? ORDER BY id",
+            (phone,),
+        )
+    ]
+    # Same second: the customer's message comes before the reply to it.
+    thread.sort(key=lambda m: (m["at"], m["role"] == "bot"))
+    return {
+        "messages": thread,
+        "last_bot_id": max((m["id"] for m in thread if m["role"] == "bot"), default=0),
+    }
+
+
+# ---- panel API -------------------------------------------------------
+
+@app.get("/api/config")
+def config():
+    return {
+        "business": CATALOG.business,
+        "live_whatsapp": wa.live(),
+        "accounts": CATALOG.accounts(),
+    }
+
+
+@app.get("/api/board")
+def board():
+    return {"orders": orders.board()}
+
+
+NEEDS_REASON = {"staff_rejects", "staff_cancels"}
+
+
+@app.post("/api/orders/{order_id}/event")
+async def order_event(order_id: int, request: Request):
+    body = await request.json()
+    event = body["event"]
+    reason = (body.get("reason") or "").strip()
+    if event in NEEDS_REASON and not reason:
+        return JSONResponse(
+            {"error": "Hace falta el motivo para avisarle al cliente."}, status_code=400
+        )
+    try:
+        order = orders.apply_event(order_id, event, reason or None)
+    except orders.IllegalTransition as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    notify(order, reason or None)
+    return order
+
+
+@app.post("/api/orders/{order_id}/handoff/resolve")
+async def resolve_handoff(order_id: int):
+    handoff.resolve(order_id)
+    try:
+        return orders.get(order_id)
+    except KeyError:
+        return JSONResponse({"error": "Pedido no encontrado."}, status_code=404)
+
+
+def _payment_confirm_message(record: dict) -> str:
+    """Built from the numbers code just computed. Never claims more than was
+    confirmed. A transfer above a MIXED order's agreed part lowers the cash still
+    owed (current()), so a surplus only appears once the receipts plus the
+    registered cash cover more than the total. While another receipt still waits
+    for a person it says so instead of quoting a balance: that money may already
+    be on its way."""
+    amount = fmt(record["receipt"]["confirmed_amount"])
+    parts = []
+    pending = [r for r in record["receipts"] if r["status"] in ("PROOF_RECEIVED", "FLAGGED")]
+    if pending:
+        parts.append(
+            f"Confirmamos su transferencia de {amount}. "
+            "El otro comprobante que envió sigue en revisión."
+        )
+    elif record["outstanding"] > 0:
+        parts.append(
+            f"Confirmamos su transferencia de {amount}. "
+            f"Quedan {fmt(record['outstanding'])} por pagar en efectivo al recibir."
+        )
+    if record["overpayment_amount"] > 0:
+        parts.append(
+            f"Confirmamos su pago. Vimos que envió {fmt(record['overpayment_amount'])} de más; "
+            "el local se va a comunicar con usted por el excedente."
+        )
+    if not parts:
+        parts.append("Confirmamos su pago. ¡Gracias!")
+    return " ".join(parts)
+
+
+@app.post("/api/orders/{order_id}/receipts/{receipt_id}/confirm")
+async def confirm_receipt(order_id: int, receipt_id: int, request: Request):
+    body = await request.json()
+    try:
+        record = payments.confirm_receipt(order_id, receipt_id, body.get("amount"))
+    except payments.PaymentError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    order = orders.get(order_id)
+    wa.send_text(order["phone"], _payment_confirm_message(record))
+    return record
+
+
+@app.post("/api/orders/{order_id}/receipts/{receipt_id}/discard")
+async def discard_receipt(order_id: int, receipt_id: int, request: Request):
+    """A person discards a receipt with a required reason; the customer gets one
+    message built from that reason (_discard_message)."""
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    reason = body.get("reason") if isinstance(body, dict) else None
+    try:
+        record = payments.discard_receipt(order_id, receipt_id, reason)
+    except payments.PaymentError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    order = orders.get(order_id)
+    wa.send_text(order["phone"], _discard_message(order, record["receipt"]["discard_reason"]))
+    return record
+
+
+@app.get("/api/receipts/{receipt_id}/photo")
+def receipt_photo(receipt_id: int):
+    found = payments.photo(receipt_id)
+    if found is None:
+        return Response(content="Sin foto.", status_code=404, media_type="text/plain; charset=utf-8")
+    data, mime = found
+    return Response(content=data, media_type=mime, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/orders/{order_id}/payment/cash")
+async def register_cash(order_id: int, request: Request):
+    body = await request.json()
+    try:
+        record = payments.register_cash(order_id, body.get("amount"))
+    except payments.PaymentError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return record
+
+
+@app.get("/api/report")
+def report(days: int = 1):
+    return reports.snapshot(days)
+
+
+@app.post("/api/reset")
+def reset():
+    db.reset()
+    brain.reset_all()
+    return {"ok": True}
+
+
+@app.post("/api/reload-config")
+def reload_config():
+    catalog = reload_catalog()
+    brain.CATALOG = catalog
+    return {"ok": True, "business": catalog.business["name"]}
+
+
+# ---- static pages ----------------------------------------------------
+
+@app.get("/")
+def index():
+    return FileResponse(STATIC / "kitchen.html")
+
+
+app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+@app.get("/kitchen")
+def kitchen():
+    return FileResponse(STATIC / "kitchen.html")
+
+
+@app.get("/reports")
+def reports_page():
+    return FileResponse(STATIC / "reports.html")
+
+
+@app.get("/simulator")
+def simulator():
+    return FileResponse(STATIC / "simulator.html")

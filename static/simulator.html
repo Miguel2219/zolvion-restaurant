@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulador</title>
+<style>
+  :root{ --wa:#075e54; --bubble-in:#ffffff; --bubble-out:#d9fdd3; --chat:#efe7de; }
+  *{box-sizing:border-box}
+  body{margin:0;background:#0d1117;color:#e6edf3;display:flex;flex-direction:column;
+       min-height:100vh;font:15px/1.45 ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif}
+  header{display:flex;align-items:center;gap:14px;padding:13px 20px;background:#161b22;
+         border-bottom:1px solid #262d38;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0;font-weight:650}
+  .spacer{flex:1}
+  header a,header button{color:#e6edf3;background:#20262f;border:1px solid #262d38;
+       border-radius:9px;padding:7px 13px;font-size:13px;text-decoration:none;cursor:pointer}
+  .wrap{flex:1;display:flex;justify-content:center;padding:18px 16px 26px}
+  .phone{width:100%;max-width:430px;display:flex;flex-direction:column;
+         border-radius:18px;overflow:hidden;box-shadow:0 8px 34px rgba(0,0,0,.5);
+         background:var(--chat);height:min(74vh,660px)}
+  .bar{background:var(--wa);color:#fff;padding:11px 15px;display:flex;align-items:center;gap:11px}
+  .avatar{width:33px;height:33px;border-radius:50%;background:#ff7a1a;color:#11161d;
+          display:grid;place-items:center;font-weight:800;font-size:14px}
+  .bar b{font-size:14.5px;display:block} .bar span{font-size:11.5px;opacity:.85}
+  .chat{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:7px}
+  .msg{max-width:82%;padding:8px 11px;border-radius:9px;font-size:14.3px;color:#111b21;
+       white-space:pre-wrap;word-wrap:break-word;box-shadow:0 1px 1px rgba(0,0,0,.13);line-height:1.42}
+  .in{background:var(--bubble-in);align-self:flex-start;border-top-left-radius:2px}
+  .out{background:var(--bubble-out);align-self:flex-end;border-top-right-radius:2px}
+  .msg img{max-width:100%;border-radius:6px;display:block}
+  .typing{align-self:flex-start;color:#667781;font-size:12.5px;padding:3px 6px}
+  .compose{display:flex;gap:8px;padding:9px;background:#f0f2f5;align-items:center}
+  .compose input[type=text]{flex:1;border:0;border-radius:20px;padding:10px 15px;
+       font-size:14.5px;outline:none;min-width:0}
+  .compose button{border:0;border-radius:50%;width:41px;height:41px;background:var(--wa);
+       color:#fff;font-size:17px;cursor:pointer;flex-shrink:0}
+  .compose label{cursor:pointer;font-size:19px;padding:0 3px;flex-shrink:0}
+  .hint{color:#8b96a5;font-size:12.5px;text-align:center;margin-top:11px;max-width:430px}
+  .quick{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-top:11px;max-width:430px}
+  .quick button{background:#20262f;border:1px solid #262d38;color:#e6edf3;border-radius:16px;
+       padding:5px 11px;font-size:12.5px;cursor:pointer}
+  .quick button:hover{background:#2a313c}
+  .side{display:flex;flex-direction:column;align-items:center}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Simulador de WhatsApp</h1>
+  <span class="spacer"></span>
+  <a href="/kitchen">Cocina</a>
+  <a href="/reports">Reportes</a>
+  <button onclick="resetAll()">Reiniciar demo</button>
+</header>
+<div class="wrap"><div class="side">
+  <div class="phone">
+    <div class="bar">
+      <div class="avatar" id="ini">P</div>
+      <div><b id="bname">Restaurante</b><span>en línea</span></div>
+    </div>
+    <div class="chat" id="chat"></div>
+    <div class="compose">
+      <label title="Enviar comprobante">📎<input type="file" id="file" accept="image/*" hidden></label>
+      <input type="text" id="box" placeholder="Escribe un mensaje" autocomplete="off">
+      <button onclick="send()">➤</button>
+    </div>
+  </div>
+  <div class="quick">
+    <button onclick="quick('Buenas, ¿qué tienen?')">¿qué tienen?</button>
+    <button onclick="quick('Quiero dos caseritas maduritas y una gaseosa personal')">2 maduritas + gaseosa</button>
+    <button onclick="quick('Mejor que una de las maduritas sea sin cebolla y con queso cheddar')">cambiar el pedido</button>
+    <button onclick="quick('¿Tienen pizza hawaiana?')">pedir algo que no existe</button>
+    <button onclick="quick('Para domicilio en Cabecera, calle 48 #34-20')">domicilio</button>
+    <button onclick="quick('Sí, confirmo')">confirmar</button>
+    <button onclick="quick('Voy a pagar por transferencia')">pagar por transferencia</button>
+  </div>
+  <div class="hint">Este simulador usa exactamente el mismo backend que WhatsApp.
+    Sirve para ensayar y como plan B si falla el internet.</div>
+</div></div>
+
+<script>
+const PHONE = new URLSearchParams(location.search).get('phone') || '573001112233';
+let lastOut = 0, polling = false;
+const chat = document.getElementById('chat');
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function bubble(text, cls, html){
+  const el = document.createElement('div');
+  el.className = 'msg ' + cls;
+  if (html) el.innerHTML = html; else el.textContent = text;
+  chat.appendChild(el); chat.scrollTop = chat.scrollHeight;
+  return el;
+}
+function typing(on){
+  let el = document.getElementById('typing');
+  if (on && !el){ el = document.createElement('div'); el.id='typing'; el.className='typing';
+    el.textContent='escribiendo…'; chat.appendChild(el); chat.scrollTop = chat.scrollHeight; }
+  if (!on && el) el.remove();
+}
+
+async function post(body){
+  typing(true);
+  try {
+    const r = await fetch('/sim/message', {method:'POST',
+      headers:{'content-type':'application/json'}, body:JSON.stringify({phone:PHONE, ...body})});
+    if(!r.ok) bubble('⚠ error del servidor: ' + (await r.text()).slice(0,300), 'in');
+  } catch(e){ bubble('⚠ ' + e.message, 'in'); }
+  typing(false);
+  await pull();
+}
+
+function quick(text){ document.getElementById('box').value = text; send(); }
+
+function send(){
+  const box = document.getElementById('box');
+  const text = box.value.trim();
+  if(!text) return;
+  bubble(text, 'out'); box.value = '';
+  post({text});
+}
+
+document.getElementById('box').addEventListener('keydown', e => { if(e.key === 'Enter') send(); });
+document.getElementById('file').addEventListener('change', async e => {
+  const file = e.target.files[0]; if(!file) return;
+  const dataUrl = await new Promise(res => { const fr = new FileReader();
+    fr.onload = () => res(fr.result); fr.readAsDataURL(file); });
+  bubble('', 'out', `<img src="${dataUrl}" alt="comprobante">`);
+  e.target.value = '';
+  post({image:dataUrl, text:'Aquí está el comprobante'});
+});
+
+async function pull(){
+  if (polling) return; polling = true;
+  try {
+    const r = await fetch(`/sim/outbound?phone=${PHONE}&after=${lastOut}`);
+    const { messages } = await r.json();
+    for (const m of messages){ lastOut = m.id; bubble(m.body, 'in'); }
+  } catch(e){ /* server restarting */ }
+  polling = false;
+}
+
+// The whole thread lives in the database, so leaving this page and coming back
+// no longer loses what the customer typed.
+async function restore(){
+  try {
+    const r = await fetch(`/sim/conversation?phone=${PHONE}`);
+    const { messages, last_bot_id } = await r.json();
+    chat.innerHTML = '';
+    for (const m of messages) bubble(m.body, m.role === 'bot' ? 'in' : 'out');
+    lastOut = last_bot_id || 0;
+  } catch(e){ /* server restarting */ }
+}
+
+async function resetAll(){
+  if(!confirm('Esto BORRA la base: pedidos, pagos, conversación y reportes vuelven a cero. ¿Seguro?')) return;
+  await fetch('/api/reset', {method:'POST'});
+  chat.innerHTML = ''; lastOut = 0;
+}
+
+fetch('/api/config').then(r => r.json()).then(c => {
+  document.getElementById('bname').textContent = c.business.name;
+  document.getElementById('ini').textContent = (c.business.short_name || 'R')[0];
+  document.getElementById('title').textContent = 'Simulador · ' + c.business.name;
+});
+restore().then(() => setInterval(pull, 1500));
+</script>
+</body>
+</html>
