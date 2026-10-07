@@ -86,7 +86,7 @@
   .modal textarea{width:100%;min-height:84px;background:#0d1117;color:var(--ink);
        border:1px solid var(--line);border-radius:9px;padding:10px;font:inherit;font-size:14px;
        resize:vertical}
-  .modal input[type=number]{width:100%;background:#0d1117;color:var(--ink);
+  .modal input[type=text]{width:100%;background:#0d1117;color:var(--ink);
        border:1px solid var(--line);border-radius:9px;padding:10px;font:inherit;font-size:14px}
   .modal .err{color:var(--bad);font-size:12.5px;min-height:17px;margin-top:5px}
   .modal .row{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
@@ -163,6 +163,17 @@ async function api(url, opts){
   return data;
 }
 
+// Same rule as money.pesos on the server: plain digits, or groups of exactly three digits
+// with one kind of separator ("26.000", "1.250.000", "47,000"). Anything else is null: a
+// decimal must never turn into another amount.
+function parsePesos(text){
+  const t = String(text).replace(/[$\s ]/g, '');
+  if(/^[0-9]+$/.test(t)) return Number(t);
+  if(/^[0-9]{1,3}([.,])[0-9]{3}(\1[0-9]{3})*$/.test(t)) return Number(t.replace(/[.,]/g, ''));
+  return null;
+}
+const NOT_PESOS = 'Escriba el monto en pesos, sin decimales (por ejemplo 26000 o 26.000).';
+
 let toastTimer;
 function toast(msg){
   const t = document.getElementById('toast');
@@ -171,15 +182,16 @@ function toast(msg){
 }
 
 // noField: a plain yes/no prompt. No input is rendered, the confirm button takes
-// the focus and onConfirm receives ''. max: upper limit of a numeric field. validate:
-// value -> error text or ''; a text keeps the dialog open and posts nothing. warning:
-// an amber line under the help text, only rendered when non-empty.
-function modal({title, help, warning, placeholder, confirmText, required, numeric, value, max, validate, noField, onConfirm}){
+// the focus and onConfirm receives ''. numeric: a text box with the numeric keypad, not
+// an input of type number: that one reads "26.000" as 26 and its arrows round a typed
+// decimal. validate: value -> error text or ''; a text keeps the dialog open and posts
+// nothing. warning: an amber line under the help text, only rendered when non-empty.
+function modal({title, help, warning, placeholder, confirmText, required, numeric, value, validate, noField, onConfirm}){
   const back = document.createElement('div');
   back.className = 'back';
   const field = noField ? ''
     : numeric
-    ? `<input id="mtext" type="number" step="1" min="0"${max != null ? ` max="${esc(max)}"` : ''} value="${esc(value ?? '')}">`
+    ? `<input id="mtext" type="text" inputmode="numeric" autocomplete="off" value="${esc(value ?? '')}">`
     : `<textarea id="mtext" placeholder="${esc(placeholder||'')}"></textarea>`;
   back.innerHTML = `<div class="modal">
       <h3>${esc(title)}</h3><p>${esc(help)}</p>
@@ -257,9 +269,10 @@ function card(o){
   const stuck = o.state === 'CONFIRMED' && secs > ALERT_SECONDS;
   const pay = o.payment || {};
   const [proofLabel, proofClass] = COMPROBANTE[pay.status] || [pay.status || 'Sin comprobante', ''];
-  // "Sin comprobante" only matters where a transfer is expected; on a cash or
-  // unspecified order it read like an unpaid order next to "Pago completo".
-  const showProof = pay.status !== 'PENDING' || ['TRANSFER', 'MIXED'].includes(pay.method);
+  // "Sin comprobante" only matters where a transfer is still expected; on a cash or
+  // unspecified order, or one whose transfer part cash already paid, it read like an
+  // unpaid order next to "Pago completo".
+  const showProof = pay.status !== 'PENDING' || (['TRANSFER', 'MIXED'].includes(pay.method) && (pay.transfer_due || 0) > 0);
   const [moneyLabel, moneyClass] = moneyTag(pay);
   const showRegisterCash = (pay.outstanding || 0) > 0;
   // On a cash or mixed order the driver collects what is still owed in cash, not the
@@ -356,10 +369,11 @@ function confirmReceipt(orderId, receiptId, prefill){
     title: 'Confirmar comprobante',
     help: 'Monto que realmente llegó con este comprobante.',
     numeric: true, required: true, value: prefill, confirmText: 'Confirmar',
+    validate: v => parsePesos(v) == null ? NOT_PESOS : '',
     onConfirm: async amount => {
       await api(`/api/orders/${orderId}/receipts/${receiptId}/confirm`, {
         method:'POST', headers:{'content-type':'application/json'},
-        body: JSON.stringify({amount: Number(amount)}),
+        body: JSON.stringify({amount}),
       });
       await draw();
     },
@@ -406,13 +420,16 @@ function registerCash(id, prefill, outstanding, unconfirmed){
     title: 'Registrar efectivo recibido',
     help: `Efectivo cobrado para este pedido, sin contar el cambio. Falta ${money(outstanding)}.`,
     warning: waiting,
-    numeric: true, required: true, value: prefill, max: outstanding,
-    validate: amount => Number(amount) > outstanding ? tooMuch : '',
+    numeric: true, required: true, value: prefill,
+    validate: amount => {
+      const n = parsePesos(amount);
+      return n == null ? NOT_PESOS : n > outstanding ? tooMuch : '';
+    },
     confirmText: 'Registrar',
     onConfirm: async amount => {
       await api(`/api/orders/${id}/payment/cash`, {
         method:'POST', headers:{'content-type':'application/json'},
-        body: JSON.stringify({amount: Number(amount)}),
+        body: JSON.stringify({amount}),
       });
       await draw();
     },

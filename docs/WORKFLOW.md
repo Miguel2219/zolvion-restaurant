@@ -16,8 +16,12 @@ How work on the MVP is organised, who does what, and how a task goes from idea t
 ## 2. Lettered tasks
 
 Work is split into tasks named by letter. Done: A (payments), B (editing orders and
-handoffs), C (one row per receipt). Planned: D (Chatwoot) and a notifications bell
+handoffs), C (one row per receipt), C2 Part 1 (fixes from the 1 Oct code review).
+Planned: C2 Part 2 (a "Pagos" block), D (Chatwoot) and a notifications bell
 (`CURRENT-STATE.md` §2).
+
+A code review can start a task: Claude Code reviews the code, Miguel reproduces each
+finding by hand on a "Bug Check" page, and the findings become the task's rows (C2).
 
 A task moves through these steps:
 
@@ -30,7 +34,11 @@ A task moves through these steps:
    P-2465), go back to Claude Code with Miguel's notes. Claude Code checks the cause in
    the code and database before changing anything, then adds a test for it. New rows
    cover behaviour that came with the fix (Task B had two fix rounds).
-6. **Close.** Every row ✅, then `CURRENT-STATE.md` and any affected document are updated.
+6. **Re-run.** After a fix round, run the failed rows again, plus the passed rows the fix
+   could break. Write the result in Notes as "Re-run <date>: …" under the first result,
+   never over it. A row about what the bot says closes only when the bot's real answer
+   matches; passing automated tests alone do not close it.
+7. **Close.** Every row ✅, then `CURRENT-STATE.md` and any affected document are updated.
 
 ## 3. The Notion checklist
 
@@ -55,7 +63,10 @@ Rules for writing rows:
 - If a row needs special material, say so (e.g. a new real transfer for an exact amount,
   made after the order is confirmed).
 - A known gap that the task does not fix is stated in the intro, not as a row.
-- End with a row "All automated tests pass", noting the count (Task B: 147; Task C: 210).
+- A behaviour nobody can see on screen gets no row; the intro names it under "checked
+  only by automated tests" (C2 Part 1: R3b, R5, R8, R11).
+- End with a row "All automated tests pass", noting the count (Task B: 147; Task C: 210;
+  Task C2 Part 1: 263).
 
 ## 4. Specifications for Claude Code
 

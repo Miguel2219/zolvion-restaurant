@@ -1,7 +1,8 @@
 # Current state
 
-Snapshot: code dated 2026-09-30 (checked 2026-10-01: 210 automated tests pass), Notion
-checklists last edited Task A 2026-09-23, Task B and Task C 2026-09-30 (Bogotá time).
+Snapshot: code last changed 2026-10-04 (Task C2 Part 1 and its 4 Oct follow-up). Tests
+run 2026-10-07: 263 pass, 1 expected failure (G16). Notion checklists, all ✅: Task A
+2026-09-23, Tasks B and C 2026-09-30, Task C2 Part 1 2026-10-06 (Bogotá time).
 
 ---
 
@@ -23,10 +24,13 @@ checklists last edited Task A 2026-09-23, Task B and Task C 2026-09-30 (Bogotá 
 - Cancel by chat before acceptance; after acceptance it goes to a person.
 - "Quiero hablar con una persona": asks the reason once; a covered reason runs its tool;
   anything else opens the amber box when the customer has a card.
+- Voice notes, stickers and locations get an answer (asks to write it, or uses the
+  address) instead of an error. Tested only in code so far; a real phone is `TEST.md` Part B.
 - Payment: cash, transfer or mixed (split validated by code), or inferred from a clean
-  receipt. Every receipt image is its own row with its own checks. The bot says
-  "received, a person will review it" or "there is a problem, a person will check";
-  never "confirmed" unless a person confirmed it.
+  receipt. Every receipt image is its own row with its own checks. Cash registered by
+  staff counts toward what is owed by transfer. The bot says "received, a person will
+  review it" or "there is a problem, a person will check"; never "confirmed" unless a
+  person confirmed it.
 - "¿Cómo va mi pedido?" and payment questions answer from the real state (ESTADO REAL),
   not from the chat history.
 - Automatic messages: accepted, ready (pickup), out for delivery; AI-written messages for
@@ -44,7 +48,8 @@ checklists last edited Task A 2026-09-23, Task B and Task C 2026-09-30 (Bogotá 
 - "Comprobantes" block: one row per receipt with time, amount, status, 👁 photo, grey
   notes, red box with reasons, Confirmar / Descartar while it waits for a person.
 - "Registrar efectivo recibido": prefilled, capped at what is owed, warns about receipts
-  not yet confirmed.
+  not yet confirmed. Amount boxes read "22.400" and "$22.400" as $22.400 and refuse
+  decimals.
 - Amber "🙋 Necesita a una persona" box with "Ya lo atendí".
 - Red pulse for a Nuevos order older than 600 s (`/kitchen?alert=20` for demos).
 - Green dot = WhatsApp connected; grey dot + banner = simulator mode.
@@ -69,6 +74,8 @@ Each task has a Notion "Task X Plan" checklist that Miguel tests by hand (`WORKF
 | A | `UNSPECIFIED` method; receipts for unspecified/cash orders; checks on date, amount and account; customer told when staff confirm; paid/unpaid/incomplete on the panel; overpayment | Done: 6/6 ✅ |
 | B | Remove "En preparación"; edit an unaccepted order in place; hand off changes to accepted orders; payment follows an edit; second receipt; payment-method changes. Fix round 1 (28 Sep): code-decided routing, `request_handoff` gate, line merge and targeting, one reply per message, "aceptado por el local" wording, grey "Revisado". Fix round 2 (29 Sep): "hablar con una persona", ESTADO REAL | Done: 55/55 ✅ (147 tests) |
 | C | One row per receipt with its own checks, photo and Confirmar; database-checked reference for every receipt; resend vs reuse; Descartar with reason; cash capped at what is owed; surplus counts cash; cash settles an unspecified method; ESTADO REAL payment line (P-2465, P-0458, P-6455, P-4766 fixes) | Done: 40/40 ✅ (210 tests) |
+| C2 Part 1 | Fixes for the 1 Oct code review, R1–R12 and R3b (§3): cash counts toward what is owed by transfer, confirm message, a modifier added twice, non-text messages, Spanish errors, order creation in one transaction, replies cleaned of the order code and "cocina", stop instruction, last model call, amounts typed by staff. Follow-up (4 Oct): R2a and R7 failed the first manual run; the bot's payment text was fixed | Done: 18/18 ✅ (263 tests). Re-runs 4 and 6 Oct |
+| C2 Part 2 | Planned. A "Pagos" block, one row per payment; G29 belongs here | No checklist yet |
 | D | Planned. Chatwoot: a handoff opens a conversation a person answers in the same WhatsApp chat; the bot stays silent for that customer until the person closes it | Not started |
 | — | Planned as its own task: a notifications bell, so a customer with no card who asks for a person reaches someone | Not started |
 
@@ -78,26 +85,37 @@ the bell; their scope is Miguel's decision.
 
 ---
 
-## 3. Open defects (code review, 2026-10-01)
+## 3. Code review defects (2026-10-01), fixed in Task C2 Part 1
 
-Found by reading and probing the code; **not yet seen in a manual test** and not fixed.
-Whether and when to fix them is Miguel's call.
+Found by reading and probing the code on 2026-10-01; reproduced by hand on 2026-10-02
+(Notion "Bug Check (code review 1 Oct)"); fixed in Task C2 Part 1; checked by hand after
+the fix in the Notion "Task C2 Plan (Part 1: bug fixes)" (2–6 Oct). Tests named below
+are in `tests/test_review_bugs.py`. "Automated only" = no manual row: nothing on the
+panel or in the simulator shows it.
 
-| # | What happens | Where |
-|---|---|---|
-| R1 | Order fully paid in cash (no receipt yet), then a transfer for the total arrives: the receipt is **clean**, the method becomes TRANSFER with no cash part, and the bot says "el pago quedó por transferencia por el total". Task C's row "fully paid in cash, then a transfer → red 'No se esperaba otro pago'" only holds when the order already had a receipt | `payments._expected_for_new_receipt` ignores `cash_received` for a first receipt |
-| R2 | A TRANSFER order where staff registered cash: the bot's state says "todavía falta por transferir" and "ya está pagado completo" together, the card shows "Sin comprobante" next to "Pago completo", and a later transfer for the remainder is checked against the full agreed amount (red) | `payments.current().transfer_due` ignores `cash_received` |
-| R3 | Staff confirm a partial transfer on a TRANSFER order: the customer is told "Quedan $X por pagar en efectivo al recibir", although they agreed to transfer | `main._payment_confirm_message` |
-| R4 | Editing an order whose line has a modifier added twice (e.g. double queso) keeps it once: the line silently gets cheaper | `cart.fill_from_order` rebuilds modifier ids by name |
-| R5 | A voice note, sticker or location (or an image that failed to download) is sent to Claude as an empty message; the API refuses it and the customer gets "Perdón, se me cruzaron los cables" | `main.handle` / `wa.parse_webhook` |
-| R6 | Some errors reach staff and the bot in English ("floats are not allowed as money", "'food_ready' is not legal from CONFIRMED") | `money.pesos`, `orders.apply_event` messages |
-| R7 | With a config that does not list `CASH`, after staff register cash on an unspecified order every later edit fails ("CASH no está habilitado") | `payments.follow_total` → `set_method` |
-| R8 | Creating an order writes the order, its lines, the cart and the payment without a transaction, and checks the total with an `assert` after writing | `orders.create_from_cart` |
+| # | What happened before the fix | Where | Bug Check (2 Oct) | After the fix |
+|---|---|---|---|---|
+| R1 | Order fully paid in cash (no receipt yet), then a transfer for the total arrives: the receipt is **clean**, the method becomes TRANSFER with no cash part, and the bot says "el pago quedó por transferencia por el total". Task C's row "fully paid in cash, then a transfer → red 'No se esperaba otro pago'" only held when the order already had a receipt | `payments._expected_for_new_receipt` ignored `cash_received` for a first receipt | Yes, P-7304: clean receipt, method → Transferencia, "Sobrepago $47.300" | ✅ by hand, three variants (P-9450, P-5786; re-run 6 Oct). Tests: `test_r1_transfer_after_full_cash_is_red`, `test_r1_full_transfer_after_partial_cash_is_red` |
+| R2 | A TRANSFER order where staff registered cash: the bot's state says "todavía falta por transferir" and "ya está pagado completo" together, the card shows "Sin comprobante" next to "Pago completo", and a later transfer for the remainder is checked against the full agreed amount (red) | `payments.current().transfer_due` ignored `cash_received` | Yes. P-1948: card "Transferencia · Sin comprobante · Pago completo"; asked "¿Cómo va mi pedido?", the bot said no receipt had arrived and asked for $21.900 already paid in cash. P-1033: red "se esperaban $7.000" while the card says "faltan $5.000" | R2a failed the first C2 run (P-0644: the bot still asked for a transfer); the 4 Oct follow-up fixed the bot's text. ✅ by hand: R2a 4 Oct, no-method variant 6 Oct, R2b 6 Oct. Tests: `test_r2a_cash_on_a_transfer_order_leaves_nothing_to_transfer`, `test_r2b_transfer_for_the_rest_after_cash_is_clean`, `test_r2_r7_partial_cash_is_named_in_the_real_state`, `test_r2a_cash_paid_all_still_shows_a_red_or_discarded_receipt`, `test_r2a_cash_paid_all_with_a_receipt_still_waiting` |
+| R3 | Staff confirm a partial transfer on a TRANSFER order: the customer is told "Quedan $X por pagar en efectivo al recibir", although they agreed to transfer | `main._payment_confirm_message` | Yes, P-3964: "Confirmamos su transferencia de $2.500. Quedan $2.500 por pagar en efectivo al recibir." | ✅ by hand: transfer (P-9233), mixed (P-0751), full transfer. Test: `test_r3_partial_confirm_on_a_transfer_order` |
+| R3b | The "Confirmamos su transferencia" message counts receipts nobody has confirmed in "envió $X de más" | `main._payment_confirm_message` read `overpayment_amount`, which includes waiting receipts | Not testable | Automated only. Test: `test_r3b_confirm_message_ignores_unconfirmed_surplus` |
+| R4 | Editing an order whose line has a modifier added twice (e.g. double queso) keeps it once: the line silently gets cheaper | `cart.fill_from_order` rebuilt modifier ids by name | Yes, hidden by the bot. P-4438's final order is right, but its stored lines show the bot removed and re-added the burger ("Hubo un lío con el queso…") | ✅ by hand (P-3545). A first try read "doble queso adicional" as one queso (P-5135, G31). Test: `test_r4_edit_keeps_a_modifier_added_twice` |
+| R5 | A voice note, sticker or location (or an image that failed to download) is sent to Claude as an empty message; the API refuses it and the customer gets "Perdón, se me cruzaron los cables" | `main.handle` / `wa.parse_webhook` | Not tested (needs real WhatsApp) | Automated only; by hand with a real phone in Task D (`TEST.md` Part B). Tests: `test_r5_non_text_message_reaches_the_bot_as_a_note`, `test_r5_reaction_gets_no_reply` |
+| R6 | Some errors reach staff and the bot in English ("floats are not allowed as money", "'food_ready' is not legal from CONFIRMED") | `money.pesos`, `orders.apply_event` messages | In part. No English seen; the two-tab case couldn't be tested; decimals → R12 | Automated only (R12 rows cover the panel). Test: `test_r6_errors_reach_staff_in_spanish` |
+| R7 | With a config that does not list `CASH`, after staff register cash on an unspecified order every later edit fails ("CASH no está habilitado") | `payments.follow_total` → `set_method` | Yes, P-8284: "no pude agregar la gaseosa personal… por un problema del sistema", then offered Nequi though it was paid in cash | The edit worked in the first C2 run, but the bot did not say what was paid and owed (P-3198, P-5300); the 4 Oct follow-up fixed the bot's text. ✅ by hand 6 Oct: Caserita, Caserita Madurita, and a mixed order (G29). Tests: `test_r7_edit_after_cash_without_cash_in_config`, `test_r7_cash_line_never_forbids_a_transfer_still_owed`, `test_r2_r7_partial_cash_is_named_in_the_real_state` |
+| R8 | Creating an order writes the order, its lines, the cart and the payment without a transaction, and checks the total with an `assert` after writing | `orders.create_from_cart` | Not testable by hand | Automated only. Tests: `test_r8_order_creation_is_all_or_nothing`, `test_r8_total_is_checked_before_writing` |
+| R9 | Only discard messages are guarded in code against the order code and "cocina"; `add_item`'s note says "nota breve para la cocina" | `main._discard_message`, `brain.TOOLS` | Not reproduced in 3 tries | ✅ by hand: no code or "cocina" in any customer message of the C2 checklist. Tests: `test_r9_replies_never_carry_the_code_or_cocina`, `test_r9_cleaning_is_grammatical`, `test_r9_tool_descriptions_never_say_cocina` |
+| R10 | The reject/cancel instruction is broken Spanish ("El local rechazado el pedido…", "El local cancelado por el local el pedido…") | `main._stop_message` | Not reproduced; both messages were correct | ✅ by hand. Test: `test_r10_stop_instruction_says_who_did_what` |
+| R11 | After 8 tool rounds the customer gets text written before the tools answered, or "Perdón, ¿me lo repite?", and the history ends on a tool result | `brain._reply_locked` | Not testable | Automated only. Tests: `test_r11_text_before_tools_never_reaches_the_customer`, `test_r11_empty_final_answer_falls_back` |
+| R12 | The panel amount boxes are `<input type="number">`, and in Chromium: "26000.5" is refused with an English error; the arrow/wheel turns it into 26001; "26.000" or "26,000" registers $26; `money.pesos("26000.5")` returns 260005 | `static/kitchen.html` modal, `money.pesos` | Yes, P-4438 stored `cash_received` 26001; no decimal confirmed amount was stored | ✅ by hand: "47.300" and "$47.300" (P-9950, P-2805), decimals refused, more than owed refused. Tests: `test_r12_decimal_amounts_are_refused`, `test_r12_panel_amount_box_is_text`, `test_r12_staff_amounts_in_colombian_format`, `test_r12_receipt_amounts_still_read` |
 
 ---
 
 ## 4. Tests
 
-`tests/test_flow.py`: 174 test functions, **210 test cases** with parameters, all passing
-(2026-10-01, 3 deprecation warnings from FastAPI's `on_event`). No AI calls happen in
-tests. Areas: `BUILD-AND-RUN.md` §5.
+`tests/test_flow.py`: 174 test functions, **210 test cases** with parameters, all passing.
+`tests/test_review_bugs.py` (Task C2 Part 1): 28 test functions, 54 cases, one or more per
+defect of §3 plus the 4 Oct follow-up; 53 pass, and `test_g16_order_code_loop_is_bounded`
+stays an expected failure (G16, out of scope). Together **263 passed, 1 xfailed**
+(2026-10-07; 3 deprecation warnings: two from FastAPI's `on_event`, one from Starlette's
+test client). No AI calls happen in tests. Areas: `BUILD-AND-RUN.md` §5.

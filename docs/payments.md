@@ -53,11 +53,15 @@ MIXED) and "Sobrepago $X".
    `extract_proof` (AI) → `check_proof` (code) → a new row with its own flags, notes,
    OCR data, reference and photo → the bot gets a bracketed instruction.
 
-**Expected amount** (`_expected_for_new_receipt`):
-- First receipt, or every earlier one is red/discarded: `_expectation`. A transfer was
-  agreed (TRANSFER, or MIXED with a transfer part) → that amount. Otherwise → the order
-  total, and a clean receipt infers the method: equal → TRANSFER, less → MIXED with the
-  rest in cash, more → flag.
+**Expected amount** (`_expected_for_new_receipt`). Registered cash comes off first:
+`left` = total − `cash_received`.
+- First receipt, or every earlier one is red/discarded: `_expectation`. `left` ≤ 0 (cash
+  already paid it all) → red "No se esperaba otro pago." A transfer was agreed (TRANSFER, or
+  MIXED with a transfer part) → that amount, capped at `left`. Otherwise → `left`, and a
+  clean receipt infers the method: equal to the total (only with no cash registered) →
+  TRANSFER, up to `left` → MIXED with the rest in cash, more → flag: "El comprobante dice
+  $X y el pedido es de $Y." with no cash registered, "El comprobante dice $X y faltaban
+  $Y." with cash (so partial cash plus a transfer for the whole total is red).
 - Later receipt: `transfer_due` (the "Faltan $X" the bot asked for); with nothing left to
   transfer on a MIXED order with cash still owed → `cash_due`; nothing owed → red "No se
   esperaba otro pago."
@@ -89,8 +93,16 @@ due), and never ask again how they will pay.
   from the confirmed total; it never rewrites an agreed TRANSFER/MIXED split. A red row's
   flags stay as a grey "✓ Revisado" line. The customer gets a code-built message
   (`main._payment_confirm_message`): "Confirmamos su transferencia de $X." plus "El otro
-  comprobante… sigue en revisión" / the balance still due / "…envió $Y de más; el local se
-  va a comunicar…", or "Confirmamos su pago. ¡Gracias!".
+  comprobante que envió sigue en revisión" while another receipt waits; otherwise "Quedan $A
+  por transferir y $B por pagar en efectivo al recibir." (each part only if owed) and, when a
+  transfer is owed, "Cuando haga la transferencia, envíenos el comprobante."; then, only when
+  confirmed receipts plus cash exceed the total (`confirmed_overpayment`), "Vimos que envió
+  $Y de más; el local se va a comunicar con usted por el excedente." (after "Confirmamos su
+  pago." when it is the only sentence); with nothing to add, "Confirmamos su pago. ¡Gracias!".
+- **Amount boxes** (Confirmar, Registrar efectivo) are text boxes with one rule, `money.pesos`
+  on the server and `parsePesos` in `kitchen.html`: plain digits, or groups of three with one
+  separator ("26000", "26.000", "1.250.000"). A decimal is refused ("sin decimales"), never
+  rounded or reinterpreted.
 - **Descartar** (`discard_receipt`): reason required (400 without it). The row turns grey,
   counts 0, is ignored by status, review and reports, and keeps its reference. The customer
   gets one model-written message from the reason; the fixed template is sent instead if the
@@ -105,11 +117,12 @@ due), and never ask again how they will pay.
 | Field | Meaning |
 |---|---|
 | `sent` | What receipts count for: confirmed at `confirmed_amount`, clean waiting ones at OCR amount, red/discarded 0 |
-| `transfer_due` | `max(transfer_amount − sent, 0)` |
+| `transfer_due` | `max(min(transfer_amount, total − cash_received) − sent, 0)`: registered cash comes off what is owed by transfer |
 | `cash_due` | `max(total − sent − cash_received − transfer_due, 0)`: cash still to collect |
 | `paid` | Confirmed receipts + `cash_received`, capped at the total |
 | `outstanding` | `max(total − paid, 0)` |
 | `overpayment_amount` | `max(sent + cash_received − total, 0)`: money owed to the customer; a person resolves it, no automatic refund |
+| `confirmed_overpayment` | `max(confirmed + cash_received − total, 0)`: the same surplus counting only confirmed receipts; the confirm message uses it |
 | `unconfirmed_amount` | Clean receipts nobody confirmed yet |
 | `status`, `under_review` | Derived order-level status; true while any receipt is red |
 
@@ -121,15 +134,23 @@ now covers everything, resets to UNSPECIFIED and the bot asks again. With a rece
 counts: TRANSFER moves to the new total, MIXED keeps its agreed transfer. The bot's line
 (`brain._payment_line`) says what is missing (with the accounts), the cash due, or the
 surplus ("Ya envió $X" / "Ya pagó $X en efectivo" / "Entre transferencias y efectivo ya
-pagó $X", "$Y más que el nuevo total", no refund promised). A red receipt sets
-`under_review`: the bot never asks for that money again.
+pagó $X", "$Y más que el nuevo total", no refund promised). With `transfer_due` 0 the
+cash edit line tells the bot to say both figures (paid in cash, still due in cash) and
+not to ask for a transfer or a receipt; with a transfer still owed it is unchanged
+(G29). On a TRANSFER order with part paid in cash the line is empty (G30). A red receipt
+sets `under_review`: the bot never asks for that money again.
 
 ## 7. What the bot knows (ESTADO REAL)
 
 `brain._payment_state` adds one line for the newest live order, in words with no amounts:
-method, receipts by status (received, confirmed, with a problem, discarded), whether a
+method, receipts by status (received, confirmed, with a problem, discarded), "el local ya
+recibió una parte en efectivo" (on any method once cash was registered), whether a
 transfer or cash is still owed, and "ya está pagado completo" / "todavía falta que una
-persona confirme el pago" / "todavía falta por pagar". `PAYMENT_RULES` tell the model to
-trust it over the chat (built after the manual runs P-2465, P-0458 and P-6455).
+persona confirme el pago" / "todavía falta por pagar". Cash that paid it all starts the
+line ("el local ya recibió el pago completo en efectivo", after "había elegido
+transferencia, pero" if that was the method) and `PAYMENT_RULES` forbid asking for a
+transfer or a receipt. `PAYMENT_RULES` tell the model to trust it over the chat (built
+after the manual runs P-2465, P-0458 and P-6455).
 
-Known defects in this area: `CURRENT-STATE.md` §3.
+Open gaps in this area: `KNOWN-GAPS.md` G27, G29, G30, G32. Defects fixed in C2 Part 1:
+`CURRENT-STATE.md` §3.

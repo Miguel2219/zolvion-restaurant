@@ -1,12 +1,13 @@
 # Known gaps
 
-What stands between the code at the snapshot (2026-09-30) and an MVP a restaurant can
-run every day. Every item was observed in the code, the repo docs or the Notion
-checklists.
+What stands between the code at the snapshot (`README_1.md`, checked 2026-10-07) and an
+MVP a restaurant can run every day. Every item was observed in the code, the repo docs or
+the Notion checklists.
 
 These are **observations, not decisions.** Which ones get fixed, in what order and how
 is Miguel's call; each becomes a lettered task only when he decides. Code defects found
-in review are listed separately in `CURRENT-STATE.md` §3.
+in review are listed separately in `CURRENT-STATE.md` §3 (all fixed in C2 Part 1).
+Numbers are never reused: a closed gap moves to §7 and keeps its number.
 
 ---
 
@@ -25,10 +26,9 @@ in review are listed separately in `CURRENT-STATE.md` §3.
 |---|---|---|---|
 | G5 | Runs on Miguel's laptop behind a free ngrok URL | Laptop off = restaurant offline; the URL changes on every ngrok restart, so Meta's webhook must be redone | `run.md` Steps 5–7 |
 | G6 | Temporary Meta token (24 h) | Replies silently stop the next day | `run.md` Step 5 |
-| G7 | The folder is not a git repository and the database has no backup | No history, no way back from a bad change; data lives in one file | repo root |
-| G8 | `.gitignore` ignores `.venv/` but the virtualenv is `venv/` | If git is initialised as is, the whole virtualenv gets committed | `.gitignore` |
+| G7 | The git repository is local only (no remote) and the database has no backup | One disk failure loses the code history and the restaurant's data | repo root, `demo.sqlite3` |
 | G9 | `app/main.py`'s docstring still calls the code a "convincing six-minute demo" | Claude Code may treat MVP work as disposable (`CLAUDE.md` now says otherwise) | `app/main.py` |
-| G10 | FastAPI's `@app.on_event("startup")` is deprecated (3 warnings in the test run) | A future FastAPI upgrade may drop it | `main._startup_check` |
+| G10 | FastAPI's `@app.on_event("startup")` is deprecated (2 of the 3 warnings in the test run; the third comes from Starlette's test client) | A future FastAPI upgrade may drop it | `main._startup_check` |
 
 ## 3. Reliability
 
@@ -38,8 +38,8 @@ in review are listed separately in `CURRENT-STATE.md` §3.
 | G12 | One global lock: one conversation turn at a time, for all customers | At a busy moment each customer waits for everyone ahead | `brain._lock` |
 | G13 | Chat history is only in memory | A restart makes the bot forget every conversation mid-order (orders survive) | `brain._history` |
 | G14 | Outbound messages are not retried and nobody is alerted on failure | A failed "su pedido va en camino" is only visible as `FAILED` in the database | `wa.send_text` |
-| G15 | Voice notes, locations, stickers arrive with no text (`CURRENT-STATE.md` R5) | Real customers send voice notes | `wa.parse_webhook`, `main.handle` |
-| G16 | Order codes are 4 random digits, retried until unused, and never freed | Collisions slow down creation as orders pile up; after 10 000 orders the loop never ends | `orders._code` |
+| G15 | Voice notes, stickers and locations now reach the bot as a note (`CURRENT-STATE.md` R5), but a voice note is not transcribed: the bot can only ask the customer to write it | Real customers send voice notes | `wa.parse_webhook`, `main._note_for` |
+| G16 | Order codes are 4 random digits, retried until unused, and never freed. An expected-failure test exists: `test_g16_order_code_loop_is_bounded` | Collisions slow down creation as orders pile up; after 10 000 orders the loop never ends | `orders._code` |
 
 ## 4. Business behaviour
 
@@ -54,13 +54,17 @@ in review are listed separately in `CURRENT-STATE.md` §3.
 | G23 | A customer with no card who asks for a person reaches nobody | The notifications bell is planned as its own task | `brain` `request_handoff` |
 | G24 | Until Task D, staff contact the customer by hand; the bot keeps answering during a handoff | Two voices in one chat | `handoff.py` |
 | G25 | A receipt whose reference cannot be read can't be recognised as a resend; it is checked as a new receipt | Same screenshot twice may become two rows (Task C known gap) | `payments.check_proof` |
+| G29 | After an edit on a MIXED order with registered cash and a transfer still owed, the edit line names only the cash part, never the transfer still owed (decision A, 4 Oct; for C2 Part 2, "Pagos" block). In the 6 Oct manual run the bot named the transfer anyway, but the code does not tell it to | The customer may not hear that a transfer is still due | `brain._payment_line` |
+| G30 | After an edit on a TRANSFER order with part of it paid in cash, the edit line says nothing about the payment (listed as not fixed in the C2 Part 1 checklist) | The customer is not told after the change what is still owed by transfer | `brain._payment_line`, `payments.follow_total` |
+| G31 | The bot can read "doble queso adicional" as one queso (P-5135, first R4 run); "una caserita con doble queso" worked (P-3545) | Code prices exactly what the model adds; here the bot showed the price and asked, so the customer could catch it | `brain.SYSTEM`, `add_item` |
+| G32 | Cash registered on top of a clean receipt still waiting for a person: "Sobrepago" counts that receipt before anyone confirms the money arrived (`TEST.md` C7; listed as not fixed in the C2 Part 1 checklist) | The card can show a surplus for a transfer nobody has seen yet | `payments.current` (`overpayment_amount`) |
 
 ## 5. Reports
 
 | # | Gap | Why it matters | Where |
 |---|---|---|---|
 | G26 | "Comprobantes marcados" and "por confirmar" count all time, not the selected period | They don't change with Hoy / 7 / 30 days (decided in Task C) | `reports.snapshot` |
-| G27 | "Cómo pagaron" sums the agreed split, not money confirmed or received | Agreed transfers may be read as money in the account | `reports.snapshot` |
+| G27 | "Cómo pagaron" sums the agreed split, not money confirmed or received. A TRANSFER order paid with registered cash still counts as transfer there (not fixed in C2 Part 1) | Agreed transfers may be read as money in the account | `reports.snapshot` |
 | G28 | "Ventas" counts customer-confirmed orders not yet accepted | A later rejection removes it from sales; until then it looks sold | `reports.COUNTED` |
 
 ## 6. Small items
@@ -70,3 +74,8 @@ in review are listed separately in `CURRENT-STATE.md` §3.
 - An image's caption is dropped when the image is read as a receipt.
 - `run.md` "What this demo does NOT do" also lists: no staff login, no multi-branch, no
   printer. Those are feature decisions, not bugs.
+
+## 7. Closed
+
+- G8 (closed 2026-10-01, first commit): `.gitignore` ignores `venv/` as well as `.venv/`;
+  no virtualenv file is tracked.

@@ -34,9 +34,10 @@ Prices are integers in pesos. The prompt lists each item as
 "Not enforced / not read" means the key exists but no code path checks it
 (`KNOWN-GAPS.md` G18–G19).
 
-Note on `payments.methods`: registering cash writes `CASH` even when it is not listed
-(staff already hold the money), but a later edit of that order then fails
-(`CURRENT-STATE.md` R7). Keep `CASH` listed unless that is fixed.
+Note on `payments.methods`: the customer can only choose a listed method, but registering
+cash writes `CASH` even when it is not listed (staff already hold the money). Later edits
+of that order still work (`CURRENT-STATE.md` R7, fixed in C2 Part 1 and checked by hand
+on 2026-10-06 with `CASH` removed).
 
 ## 2. Current content (Caseritas Burger)
 

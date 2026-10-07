@@ -27,6 +27,20 @@ TRANSITIONS = {
 
 TERMINAL = {"COMPLETED", "CANCELLED", "REJECTED", "EXPIRED"}
 
+# A state as staff read it in an error message (apply_event). Not what the customer reads:
+# brain.STATE_LABELS is for that.
+STATE_WORDS = {
+    "PENDING_CONFIRMATION": "esperando la confirmación del cliente",
+    "CONFIRMED": "confirmado por el cliente y sin aceptar",
+    "ACCEPTED": "aceptado por el local",
+    "READY": "listo",
+    "OUT_FOR_DELIVERY": "en camino",
+    "COMPLETED": "entregado",
+    "CANCELLED": "cancelado",
+    "REJECTED": "rechazado",
+    "EXPIRED": "vencido",
+}
+
 # order-modification.md
 EDITABLE = ("PENDING_CONFIRMATION", "CONFIRMED")          # window 2 - orders.amend, in place
 LOCKED = ("ACCEPTED", "READY", "OUT_FOR_DELIVERY")        # window 3 - _handoff, to a person
@@ -74,43 +88,47 @@ def modification_window(phone: str) -> tuple[int, dict | None]:
 
 
 def create_from_cart(phone: str, fulfilment: str, address=None, zone=None) -> dict:
-    """Freeze the cart into an order. Totals recomputed here, from the catalog."""
+    """Freeze the cart into an order. Totals recomputed here, from the catalog.
+    The order, its lines, its first transition, the cart and the payment land
+    together or not at all."""
     if fulfilment not in ("PICKUP", "DELIVERY"):
         raise ValueError("fulfilment must be PICKUP or DELIVERY")
-    view = summary(phone, zone=zone, fulfilment=fulfilment)
-    if view["empty"]:
-        raise ValueError("cannot create an order from an empty cart")
+    with db.transaction():
+        view = summary(phone, zone=zone, fulfilment=fulfilment)
+        if view["empty"]:
+            raise ValueError("cannot create an order from an empty cart")
+        # Invariant 6, checked BEFORE anything is written. An explicit raise,
+        # not assert: python -O must not strip a guard that protects a write.
+        if total_of([line["line_total"] for line in view["lines"]], view["delivery_fee"]) != view["total"]:
+            raise ValueError("total does not match its line items")
 
-    cart_id = view["cart_id"]
-    related = related_order_of(cart_id)
-    code = _code()
-    while db.q1("SELECT 1 FROM orders WHERE code=?", (code,)):
+        cart_id = view["cart_id"]
+        related = related_order_of(cart_id)
         code = _code()
+        while db.q1("SELECT 1 FROM orders WHERE code=?", (code,)):
+            code = _code()
 
-    cursor = db.run(
-        """INSERT INTO orders(code, phone, cart_id, state, fulfilment_type, address, zone,
-                              subtotal, delivery_fee, total, related_order_id,
-                              created_at, updated_at)
-           VALUES(?,?,?,'PENDING_CONFIRMATION',?,?,?,?,?,?,?,?,?)""",
-        (
-            code, phone, cart_id, fulfilment, address, view["zone"],
-            view["subtotal"], view["delivery_fee"], view["total"], related,
-            db.now(), db.now(),
-        ),
-    )
-    order_id = cursor.lastrowid
+        cursor = db.run(
+            """INSERT INTO orders(code, phone, cart_id, state, fulfilment_type, address, zone,
+                                  subtotal, delivery_fee, total, related_order_id,
+                                  created_at, updated_at)
+               VALUES(?,?,?,'PENDING_CONFIRMATION',?,?,?,?,?,?,?,?,?)""",
+            (
+                code, phone, cart_id, fulfilment, address, view["zone"],
+                view["subtotal"], view["delivery_fee"], view["total"], related,
+                db.now(), db.now(),
+            ),
+        )
+        order_id = cursor.lastrowid
 
-    _write_items(order_id, view["lines"])
-    _log(order_id, None, "PENDING_CONFIRMATION", "system", "order created")
-    db.run("UPDATE carts SET state='CONVERTED', updated_at=? WHERE id=?", (db.now(), cart_id))
-    db.run(
-        "INSERT INTO payments(order_id, method, transfer_amount, cash_amount, status, updated_at)"
-        " VALUES(?,'UNSPECIFIED',0,0,'PENDING',?)",
-        (order_id, db.now()),
-    )
-    # Invariant 6: the stored total equals the sum of the stored lines plus the fee.
-    check = total_of([line["line_total"] for line in view["lines"]], view["delivery_fee"])
-    assert check == view["total"], "total does not match its line items"
+        _write_items(order_id, view["lines"])
+        _log(order_id, None, "PENDING_CONFIRMATION", "system", "order created")
+        db.run("UPDATE carts SET state='CONVERTED', updated_at=? WHERE id=?", (db.now(), cart_id))
+        db.run(
+            "INSERT INTO payments(order_id, method, transfer_amount, cash_amount, status, updated_at)"
+            " VALUES(?,'UNSPECIFIED',0,0,'PENDING',?)",
+            (order_id, db.now()),
+        )
     return get(order_id)
 
 
@@ -203,16 +221,17 @@ def _log(order_id: int, from_state, to_state: str, actor: str, reason=None) -> N
 def apply_event(order_id: int, event: str, reason=None) -> dict:
     row = db.q1("SELECT * FROM orders WHERE id=?", (order_id,))
     if row is None:
-        raise IllegalTransition(f"order {order_id} does not exist")
+        raise IllegalTransition("Ese pedido no existe.")
     current = row["state"]
+    words = STATE_WORDS.get(current, current)
     if current in TERMINAL:
-        raise IllegalTransition(f"{current} is terminal; '{event}' is not allowed")
+        raise IllegalTransition(f"El pedido ya está {words}; no se puede cambiar.")
     target = TRANSITIONS.get((current, event))
     if target is None:
-        raise IllegalTransition(f"'{event}' is not legal from {current}")
+        raise IllegalTransition(f"Esa acción ya no aplica: el pedido está {words}.")
     to_state, actor = target
     if to_state == "OUT_FOR_DELIVERY" and row["fulfilment_type"] != "DELIVERY":
-        raise IllegalTransition("OUT_FOR_DELIVERY is only valid on a DELIVERY order")
+        raise IllegalTransition("Solo un pedido a domicilio puede salir a domicilio.")
     db.run("UPDATE orders SET state=?, updated_at=? WHERE id=?", (to_state, db.now(), order_id))
     _log(order_id, current, to_state, actor, reason)
     return get(order_id)

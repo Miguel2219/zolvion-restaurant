@@ -798,7 +798,8 @@ def test_cash_keeps_a_chosen_method(method):
 def test_real_state_says_whether_the_order_is_paid():
     """P-6455: cash registered on an order whose method was never chosen. The line
     said only "todavía no ha dicho cómo va a pagar", so the bot asked how the
-    customer would pay and then said no payment was registered."""
+    customer would pay and then said no payment was registered, and P-9950 (C2
+    manual check: the bot asked for a Nequi transfer)."""
     order = _confirmed_order()
     head = "- Pago del pedido más reciente: "
     assert _payment_line(brain.system_prompt(PHONE)) == (
@@ -808,7 +809,8 @@ def test_real_state_says_whether_the_order_is_paid():
     payments.register_cash(order["id"], ESPECIAL)
     prompt = brain.system_prompt(PHONE)
     assert _payment_line(prompt) == (
-        head + "en efectivo al recibir; no ha enviado ningún comprobante; ya está pagado completo."
+        head + "el local ya recibió el pago completo en efectivo; no hace falta que transfiera "
+        "ni que envíe comprobante; ya está pagado completo."
     )
     assert ("Si aquí dice que ya está pagado completo, nunca le preguntes cómo va a pagar ni "
             "le digas que no tiene pago registrado." in _real_state_block(prompt))

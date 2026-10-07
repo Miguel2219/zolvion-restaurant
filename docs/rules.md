@@ -17,7 +17,9 @@ references in its comments mean.
    when ESTADO REAL shows one confirmed. A receipt never blocks an order's transitions.
 3. **Customer messages never contain the order code (`P-1234`) or the word "cocina".**
    The system prompt forbids it, tool results repeat "No le menciones ningún código",
-   tests check every fixed notification, and the discard message is guarded in code.
+   tests check every fixed notification, and every bot reply is cleaned in code
+   (`main._clean_for_customer`: codes removed, "cocina" said as "el local"). The discard
+   message keeps its own template guard.
 4. **Uniqueness lives in the database, not in Python.** A repeated WhatsApp message id
    and a reused receipt reference are rejected by constraints; code decides resend vs.
    reuse only after the `IntegrityError`. `db.run()` rolls back on failure so the thread
@@ -79,7 +81,8 @@ fixed template fallback.
 ### Tests
 
 - Set `DEMO_DB` before importing `app`. Read expected prices from `CATALOG`.
-- New behaviour gets a test in `tests/test_flow.py`; the suite must stay green.
+- New behaviour gets a test in `tests/test_flow.py`; a code-review defect gets one in
+  `tests/test_review_bugs.py`, named after it (`test_r7_…`). The suite must stay green.
 
 ### Chat history
 
@@ -93,15 +96,17 @@ task plans. Those documents are **not** part of this project. What each means he
 
 | Reference in comments | Meaning in this code |
 |---|---|
-| `R3` | Duplicate protection lives in the database (unique WhatsApp message id) |
-| `R9` | A record of every outbound message is written first (`outbound_messages`). The retries that rule also asks for are not built |
+| `R3` (`db.py`) | Duplicate protection lives in the database (unique WhatsApp message id) |
+| `R9` (`wa.py`) | A record of every outbound message is written first (`outbound_messages`). The retries that rule also asks for are not built |
+| `R1` (`payments.py`), `C2 R2a`, `C2 R7` (`brain.py`); `test_r1_…` to `test_r12_…` | Not the old design's rules: defects R1–R12 of the 1 Oct code review, `CURRENT-STATE.md` §3 |
+| DECISION F1 = A (`brain.py`) | C2 Part 1 follow-up decision (4 Oct): a MIXED order that still owes a transfer keeps the old edit line (`KNOWN-GAPS.md` G29) |
 | `Invariant 6` | Rule 6 above: total = lines + fee, computed by code |
 | `order-modification.md` / "window 1/2/3" | The modification windows, `ORDER-LIFECYCLE.md` §3 |
 | `notifications-and-followups.md §1` | Who gets told what, `ORDER-LIFECYCLE.md` §5 |
 | `payments.md` / `payments.md §3` in code | The old design's payment doc and reused-reference rule. This repo's `docs/payments.md` describes the MVP |
 | Q1 / Q2 / Q3 / D3 | Task C plan decisions: Q1 expectation after only red receipts, Q2 grey note while another is red, Q3 transferring the cash part / nothing owed, D3 resend vs. reuse of a reference |
-| P-2465, P-0458, P-6455, P-4766 | Orders from Miguel's manual runs whose bugs a fix or test refers to |
-| "Task A / A' / B / C / D" | Lettered work packages, `CURRENT-STATE.md` §2 |
+| P-0458, P-0644, P-3564, P-4766, P-6455, P-9950 | Orders from Miguel's manual runs whose bugs a fix or test refers to (`CURRENT-STATE.md` §3, Notion checklists). P-4438 also serves as a sample code in the R9 cleaning tests |
+| "Task A / A' / B / C / C2 / D" | Lettered work packages, `CURRENT-STATE.md` §2 |
 
 Where the MVP and the old design differ, the MVP wins. Examples: the MVP edits an
 unaccepted order in place (old design: cancel and recreate); the MVP has no

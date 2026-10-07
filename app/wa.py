@@ -132,12 +132,15 @@ def parse_webhook(payload: dict) -> list[dict]:
                     "kind": message.get("type"),
                     "text": None,
                     "media_id": None,
+                    "location": None,
                 }
                 if message.get("type") == "text":
                     item["text"] = message.get("text", {}).get("body")
                 elif message.get("type") == "image":
                     item["media_id"] = message.get("image", {}).get("id")
                     item["text"] = message.get("image", {}).get("caption")
+                elif message.get("type") == "location":
+                    item["location"] = message.get("location") or {}
                 elif message.get("type") == "interactive":
                     interactive = message.get("interactive", {})
                     item["text"] = (

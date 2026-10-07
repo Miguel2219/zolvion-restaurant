@@ -1,0 +1,20 @@
+Task C2 Part 1: fix code-review defects R1-R12
+
+Fixes from the 1 Oct code review, checked by hand in the Notion
+"Task C2 Plan (Part 1: bug fixes)" (all rows passed, re-runs 4 and 6 Oct).
+
+- R1, R2: registered cash counts toward what is owed by transfer
+- R3, R3b: confirm message fixed for transfer orders and unconfirmed surplus
+- R4: an edit keeps a modifier added twice
+- R5: voice notes, stickers and locations reach the bot as a note
+- R6: errors reach staff in Spanish
+- R7: edits work after cash on a config without CASH
+- R8: order creation in one transaction, total checked before writing
+- R9: replies cleaned of the order code and "cocina"
+- R10: reject/cancel instruction fixed
+- R11: only the final answer reaches the customer
+- R12: staff amounts in Colombian format, decimals refused
+- 4 Oct follow-up: the bot's payment text after cash (R2a, R7)
+
+Known gap left for Part 2: G29.
+Tests: 263 passed, 1 xfailed (G16).

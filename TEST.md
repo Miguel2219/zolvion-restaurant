@@ -6,7 +6,8 @@
 - **Part D** — automated tests.
 
 The full per-task checklists, with Miguel's verdicts, are the Notion pages
-"Task A/B/C Plan" (Zolvion - Demo Documentation › Tasks). Expected totals come from
+"Task A/B/C Plan" and "Task C2 Plan (Part 1: bug fixes)" (Zolvion - Demo Documentation ›
+Tasks). Expected totals come from
 `config/restaurant.json`: change a price and they change too.
 
 ---
@@ -57,6 +58,15 @@ pickup vs delivery, lost orders, receipts flagged / awaiting, all from what you 
 1. The dot on the kitchen tab is **green** (grey = WhatsApp not connected).
 2. From a phone that is not the business number, write to the Claro number.
 3. Repeat A1, A2, A3, A5, A6 (same numbers), then A7 with a screenshot from the gallery.
+4. Messages that are not text (R5), one by one:
+   - **Voice note** → the bot says it can't listen to voice notes, asks you to write it and
+     carries on with the order; it never acts as if it understood.
+   - **Sticker** → the same, for stickers.
+   - **Location with an address** (pick a place) → it uses that address for delivery, asks
+     for the barrio if you didn't say it, and never invents an address from the coordinates.
+   - **Location without an address** (a dropped pin) → it asks for the written address
+     (street, number, barrio).
+   - **👍 reaction** on a bot message → no reply at all, and no error in the uvicorn window.
 
 | What you see in the uvicorn window | Meaning |
 |---|---|
@@ -83,6 +93,8 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
   cancelled, no amber box.
 - `¿qué tengo en mi pedido?` then an add → one card, no "ya fue enviado al local".
 - Two more identical gaseosas → one line "3× Gaseosa personal"; `quíteme una gaseosa` → 2×.
+- `Una caserita con doble queso`, confirm, then add a gaseosa → the card keeps "Caserita
+  (Queso, Queso)"; the bot mentions no problem with the queso.
 - 1 Caserita + 1 Caserita sin cebolla, `déjeme dos caseritas` → the bot asks which line,
   without ids; only the chosen line changes. A line that does not exist → it says so.
 - Reports › "Pedidos que no se concretaron" stays at zero after these edits.
@@ -125,12 +137,19 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
 - Mixed order: also transferring the exact cash part → clean row; both confirmed → "Pago
   completo" with no cash registered.
 - All rows confirmed and another receipt → red "No se esperaba otro pago".
+- Full total registered in cash, then a transfer → red "No se esperaba otro pago.", the
+  method stays "Efectivo", no "Sobrepago".
+- $5.000 order with $2.500 cash: a $5.000 transfer → red "El comprobante dice $5.000 y
+  faltaban $2.500."; a $2.500 transfer instead → clean row (also on a transfer order).
 
 ### C6 · Staff actions on a receipt
 - Confirmar opens with that receipt's amount ("Monto que realmente llegó…"); $0 is refused
   with a pointer to Descartar. Confirming one of two → "Confirmamos su transferencia de $X.
   El otro comprobante que envió sigue en revisión." and "Pago incompleto · faltan $Y".
 - Confirming a red row → its text stays as a grey "✓ Revisado" line.
+- Partial transfer confirmed on a transfer order → "…Quedan $X por transferir. Cuando haga
+  la transferencia, envíenos el comprobante.", nothing about cash; on a mixed order →
+  "…Quedan $Y por pagar en efectivo al recibir."
 - Descartar asks for a reason (empty = refused, nothing sent) → grey row, "Descartado",
   "Motivo: …", no buttons, no money; one short message to the customer with the reason;
   `¿Cómo va mi pedido?` never says it is still under review. Its 👁 still works, and the
@@ -139,12 +158,19 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
 ### C7 · Cash
 - Cash order $22.400: the dialog opens with $22.400; $30.000 is refused with «El monto es
   mayor de lo que falta ($22.400)…»; $22.400 → "Pago completo", no "Sobrepago".
+- The amount box (Confirmar and Registrar efectivo) is a plain text box with no spinner
+  arrows: `22.400`, `$22.400` and `22400` register $22.400; `22400.5` and `2,5` are refused with
+  "Escriba el monto en pesos, sin decimales…" and nothing is stored.
 - $52.300 order with a clean, unconfirmed $30.000 receipt → the dialog warns "Hay
   comprobantes sin confirmar por $30.000…"; registering $52.300 shows "Sobrepago $30.000";
   confirming the receipt sends "…envió $30.000 de más; el local se va a comunicar…".
 - No method chosen, register the full total → "Efectivo" and "Pago completo", no "Sin
   comprobante"; the bot never asks how they pay; `mejor lo pago por transferencia` → amber
   box, method unchanged; `lo pago en efectivo` → "no cambió nada".
+- Transfer order, full total registered in cash: `¿Ya quedó pago mi pedido?` → paid, the
+  restaurant received the cash; no Nequi, no request for a transfer or a receipt.
+- Config without `CASH` (restore it and restart after): Caserita, $18.900 cash, then add a
+  gaseosa personal → same card, $22.400; the bot says $18.900 paid and $3.500 left in cash.
 - Mixed $10.000 + cash, a $15.000 transfer confirmed at $15.000 → "Efectivo por cobrar
   $7.400". Removing a product below what was paid → "Sobrepago", no refund promised.
 
@@ -158,7 +184,8 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
 
 ## Part D — automated tests
 
-`python -m pytest tests -q` → **210 passed** (Task B ended with 147).
+`python -m pytest tests -q` → **263 passed, 1 xfailed** (Task B ended with 147, Task C
+with 210; the xfail is G16, out of scope for C2 Part 1).
 
 ## Before the demo
 

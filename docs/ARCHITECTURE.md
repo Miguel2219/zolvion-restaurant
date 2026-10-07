@@ -28,7 +28,14 @@ and receiving. Three static HTML pages poll a JSON API.
 `brain.reply()` runs up to 8 rounds: send the conversation to Claude with the tool
 list → run every tool it asks for → send the results back → stop when it answers
 without a tool. Tools are the only way the AI can touch an order. Only the last
-round's text is sent to the customer.
+round's text is sent to the customer. If the model still wants tools after round 8,
+one more call with tools switched off writes the answer.
+
+What the bot cannot read (voice note, sticker, location, video, document, an image that
+failed to download) reaches `handle()` as a bracketed note for the model
+(`main._note_for`) instead of empty text; a reaction gets no reply and no model call.
+Every reply is cleaned of order codes and the word "cocina" (`main._clean_for_customer`)
+before it is sent.
 
 ## 2. Modules (`app/`, in dependency order)
 
@@ -45,7 +52,7 @@ round's text is sent to the customer.
 | `wa.py` | WhatsApp Cloud API (Graph v21.0): send, download media, signature, parse webhook, FAKE mode |
 | `brain.py` | System prompt, ESTADO REAL block, `TOOLS`, `_run_tool`, chat history, `extract_proof` |
 | `reports.py` | SQL aggregates for the reports page |
-| `main.py` | HTTP routes, `handle()`, `notify()`, customer messages for confirm/discard; creates the database on import |
+| `main.py` | HTTP routes, `handle()`, `_note_for()`, `notify()`, customer messages for confirm/discard, `_clean_for_customer()`; creates the database on import |
 
 `static/`: `kitchen.html`, `simulator.html`, `reports.html`: plain HTML + JS, no build
 step. Panel buttons send event names straight from `orders.TRANSITIONS`.
@@ -55,7 +62,7 @@ step. Panel buttons send event names straight from `orders.TRANSITIONS`.
 | Route | Purpose |
 |---|---|
 | `GET /webhook` | Meta's verification handshake (`WHATSAPP_VERIFY_TOKEN`) |
-| `POST /webhook` | Inbound WhatsApp. Signature checked on the raw body first (403); duplicates skipped by the database |
+| `POST /webhook` | Inbound WhatsApp. Signature checked on the raw body first (403); duplicates skipped by the database; reactions stored and ignored |
 | `POST /sim/message` | Inbound from the simulator (text and/or base64 image) |
 | `GET /sim/outbound`, `GET /sim/conversation` | Simulator reads replies / rebuilds the thread |
 | `GET /api/config` | Business data, WhatsApp live or not, accounts |
@@ -114,7 +121,7 @@ and drops the old `payments_reference_unique` index.
   one after another on the event-loop thread. `orders.amend` relies on this and keeps a
   guarded `UPDATE … WHERE state IN (…)` as a second defence.
 - The cost: while one bot turn runs (Claude calls, up to 8 rounds), the whole server
-  waits, panel polling and buttons included (`KNOWN-GAPS.md` G9–G10).
+  waits, panel polling and buttons included (`KNOWN-GAPS.md` G11–G12).
 
 ## 7. The AI's two jobs
 

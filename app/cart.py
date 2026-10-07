@@ -52,11 +52,12 @@ def fill_from_order(phone: str, order: dict) -> int:
     """Window 2: the order is being edited, so its items go back into a fresh
     cart. Without this the customer would have to repeat the whole order."""
     cart_id = open_cart(phone)
+    # A stored line keeps modifier names, in order. A modifier added twice is stored
+    # twice ("Queso", "Queso") and must stay twice: walking the catalog instead would
+    # keep it once and silently make the line cheaper.
+    by_name = {m["name"]: m["id"] for m in CATALOG.raw["menu"].get("modifiers", [])}
     for item in order["items"]:
-        modifier_ids = [
-            m["id"] for m in CATALOG.raw["menu"].get("modifiers", [])
-            if m["name"] in (item.get("modifiers") or [])
-        ]
+        modifier_ids = [by_name[n] for n in (item.get("modifiers") or []) if n in by_name]
         unit_price = CATALOG.price_of(item["item_id"]) + sum(
             CATALOG.modifier_price(m) for m in modifier_ids
         )

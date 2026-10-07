@@ -28,7 +28,7 @@
     ]
   },
   "payments": {
-    "methods": ["CASH", "TRANSFER", "MIXED"],
+    "methods": ["CASH","TRANSFER", "MIXED"],
     "proof_clock_skew_minutes": 2,
     "proof_notice_minutes": 5,
     "accounts": [

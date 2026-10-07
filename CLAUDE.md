@@ -23,14 +23,14 @@ Spanish, addressing the customer as *usted*. Every `.md` file stays under 200 li
 
 ## Commands
 
-Windows/PowerShell. The virtualenv is `venv/` (`.gitignore` only ignores `.venv/`).
+Windows/PowerShell. The virtualenv is `venv/` (ignored by git, like `.venv/`).
 No linter or formatter is configured.
 
 ```powershell
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
-python -m pytest tests -q                                   # all 210 tests
+python -m pytest tests -q                                   # 263 pass, 1 xfail (G16)
 python -m pytest tests -q -k wrong_amount                   # by name
 python -m pytest tests/test_flow.py::test_happy_path_pickup # one test
 ```
@@ -87,8 +87,9 @@ buttons send event names from `orders.TRANSITIONS`. Routes and tables: `docs/ARC
 2. **The bot never confirms a payment.** Only `POST /api/orders/{id}/receipts/{rid}/confirm`
    (a person in the panel) sets `CONFIRMED`. A receipt never blocks an order transition.
 3. **Customer messages never contain the order code (`P-1234`) or the word "cocina".**
-   Tests assert it on every notification; `SYSTEM` forbids it; only `_discard_message`
-   also guards the model's text in code.
+   Tests assert it on every notification; `SYSTEM` forbids it; every bot reply is cleaned in
+   code (`main._clean_for_customer`: codes removed, "cocina" → "el local"); discard keeps its
+   own template guard.
 4. **Uniqueness lives in the database.** `inbound_messages.wa_message_id` is the PK;
    `payment_receipts.reference` has a unique partial index (a discarded receipt keeps its
    reference). Code tells a resend from a reuse only after the `IntegrityError`.
@@ -137,9 +138,10 @@ from the staff's reason (`_stop_message`, template fallback). `COMPLETED` and cu
   `DISCARDED`; the last two are final. Order-level status is derived: worst receipt wins
   (`FLAGGED` > `PROOF_RECEIVED` > `CONFIRMED`), discarded ignored, none left = `PENDING`.
 - Expected amount (`_expected_for_new_receipt`): a first receipt (or when earlier ones are all
-  red/discarded) uses `_expectation`: the agreed transfer, else the total with the method
-  **inferred** from a clean receipt. Later receipts: `transfer_due`, then `cash_due` on MIXED,
-  else red "No se esperaba otro pago." Other checks: date window (`proof_clock_skew_minutes`,
+  red/discarded) uses `_expectation(current())`: registered cash comes off first (all paid →
+  red "No se esperaba otro pago."), then the agreed transfer capped at what is left, else what
+  is left with the method **inferred** from a clean receipt. Later receipts: `transfer_due`,
+  then `cash_due` on MIXED, else that red. Other checks: date window (`proof_clock_skew_minutes`,
   grey note past `proof_notice_minutes`), destination (`Catalog.owns_account`; holder name only
   when no number is shown), grey note when another receipt is red.
 - Repeated reference: same order and same readable amount = resend (no row, `resent=True`);
@@ -150,9 +152,10 @@ from the staff's reason (`_stop_message`, template fallback). `COMPLETED` and cu
   `_discard_message` (template if the model fails or writes "confirmad", "cocina", "$" or the
   code; `brain.correct_last_reply` fixes the history). `register_cash` never exceeds
   `outstanding` (400 «El monto es mayor de lo que falta…») and settles `UNSPECIFIED` as `CASH`.
-- `current()` returns `sent`, `transfer_due`, `cash_due`, `paid` (confirmed + cash, capped),
-  `outstanding`, `overpayment_amount` (`sent + cash_received - total`), `unconfirmed_amount`,
-  `status`, `under_review`. Overpayment never blocks anything; a person resolves it.
+- `current()` returns `sent`, `transfer_due` (registered cash comes off it), `cash_due`, `paid`
+  (confirmed + cash, capped), `outstanding`, `overpayment_amount` (`sent + cash_received -
+  total`), `confirmed_overpayment` (the same, confirmed receipts only: what the confirm message
+  says), `unconfirmed_amount`, `status`, `under_review`. Overpayment never blocks anything.
 - `choose_payment` goes to a person once a receipt arrived, cash was registered or the order is
   out for delivery; repeating the current method answers "no cambió nada".
 
@@ -164,7 +167,8 @@ from the staff's reason (`_stop_message`, template fallback). `COMPLETED` and cu
 - One global lock serializes turns for all phones (`extract_proof` runs outside it). Every
   route that writes is `async` with no `await` around database work, so writes run one at a
   time; `orders.amend` still keeps a guarded `UPDATE … WHERE state IN (…)`.
-- Only the last round's text reaches the customer (each round's text replaces the previous).
+- Only the last round's text reaches the customer. If the model still wants tools after
+  `MAX_TOOL_ROUNDS` (8), one last call with `tool_choice` none answers; only its text is sent.
 - `system_prompt(phone)` appends `ESTADO REAL AHORA` on every model call: the live orders'
   states plus one "Pago del pedido más reciente" line (`_payment_state`, no amounts) and
   `PAYMENT_RULES`. It wins over the chat history. No codes or totals in it.
@@ -179,7 +183,7 @@ model, often a bracketed instruction (`(… No le menciones ningún código.)`),
 failures as `NO SE PUDO: …` instead of raising. Anything that changes what was ordered goes
 through `_edit` first.
 
-## Tests (`tests/test_flow.py`)
+## Tests (`tests/test_flow.py`; code-review defects R1–R12 in `tests/test_review_bugs.py`)
 
 - Set `DEMO_DB` **before** importing `app`; `db.DB_PATH` is resolved at import.
 - Expected numbers come from `config/restaurant.json`; changing a price moves tests on purpose.

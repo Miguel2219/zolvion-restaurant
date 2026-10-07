@@ -59,7 +59,7 @@ is connected and whether the webhook signature is checked.
 5. Aceptar → Listo → Sale a domicilio → Entregado: the messages appear in the simulator
 6. Reports → sales, top item, payment split
 
-Then `python -m pytest tests -q` → **210 passed**. Full checks: `TEST.md`.
+Then `python -m pytest tests -q` → **263 passed, 1 xfailed**. Full checks: `TEST.md`.
 **If anything fails here, fix it now.** Do not move on to WhatsApp.
 
 ## Step 5 — Connect WhatsApp Cloud API (15 min)

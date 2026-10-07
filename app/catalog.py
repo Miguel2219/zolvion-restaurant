@@ -45,7 +45,7 @@ class Catalog:
     def price_of(self, item_id: str) -> int:
         item = self._items.get(item_id)
         if item is None:
-            raise KeyError(f"unknown item: {item_id}")
+            raise KeyError(item_id)
         return int(item["price"])
 
     def is_available(self, item_id: str) -> bool:
@@ -58,7 +58,7 @@ class Catalog:
     def modifier_price(self, modifier_id: str) -> int:
         modifier = self._modifiers.get(modifier_id)
         if modifier is None:
-            raise KeyError(f"unknown modifier: {modifier_id}")
+            raise KeyError(modifier_id)
         return int(modifier["price"])
 
     def modifier_allowed(self, modifier_id: str, item_id: str) -> bool:

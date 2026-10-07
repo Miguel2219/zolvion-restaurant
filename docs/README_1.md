@@ -3,10 +3,11 @@
 Start here. This file says what the system is, why it exists, and which document answers
 which question.
 
-Snapshot these docs describe: code on disk dated **2026-09-30** (local folder
-`C:\Users\PC\Desktop\zolvion-demo`), checked on **2026-10-01** with 210 automated tests
-passing; Notion task checklists A, B and C all ✅. Anything newer is not reflected here
-until the docs are updated.
+Snapshot these docs describe: code last changed **2026-10-04** (local folder
+`C:\Users\PC\Desktop\zolvion-demo`, git branch `bugfix/notion-bugs`), checked on
+**2026-10-07** with 263 automated tests passing and 1 expected failure (G16); Notion task
+checklists A, B, C and C2 Part 1 all ✅. Anything newer is not reflected here until the
+docs are updated.
 
 ---
 
@@ -91,6 +92,7 @@ script), `TEST.md` (manual regression script).
 
 - Notion: "Zolvion - Demo Documentation" —
   https://app.notion.com/p/Zolvion-Demo-Documentation-3e4ee8d8c287804dbe69f9c25fa115ff
-  › Tasks (Task A, B, C Plan) — https://app.notion.com/p/3e4ee8d8c28780c9a1a8fc08b4d861f9
+  › Tasks (Task A, B, C Plan; Bug Check; Task C2 Plan Part 1) —
+  https://app.notion.com/p/3e4ee8d8c28780c9a1a8fc08b4d861f9
 - Full-architecture repo (not this MVP): https://github.com/Miguel2219/zolvion-restaurant
-- The MVP folder has no git repository yet (`KNOWN-GAPS.md` G7).
+- The MVP folder is a local git repository with no remote yet (`KNOWN-GAPS.md` G7).

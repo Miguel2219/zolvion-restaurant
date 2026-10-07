@@ -155,7 +155,10 @@ PAYMENT_RULES = (
     "y ya no está en revisión: nunca digas que sigue en revisión. Si aquí ya dice cómo "
     "va a pagar, no se lo vuelvas a preguntar; sólo si el cliente quiere cambiarlo, usa "
     "choose_payment. Si aquí dice que ya está pagado completo, nunca le preguntes cómo "
-    "va a pagar ni le digas que no tiene pago registrado."
+    "va a pagar ni le digas que no tiene pago registrado. Si aquí dice que el local ya "
+    "recibió el pago completo en efectivo, el pedido ya está pagado aunque antes haya "
+    "elegido transferencia: nunca le pidas que transfiera ni que envíe un comprobante, "
+    "ni le des las cuentas para pagar."
 )
 
 
@@ -166,8 +169,8 @@ def _count(n: int, one: str, many: str) -> str:
 def _payment_state(phone: str) -> str | None:
     """The newest live order's payment in words: the method, its receipts, what is
     still owed and whether it is fully paid. That order is where a receipt image
-    lands (main.handle). No amounts: the numbers the customer sees come from tools
-    and instructions."""
+    lands (main.handle). Cash that paid it all comes first. No amounts: the numbers
+    the customer sees come from tools and instructions."""
     order = orders.latest_for(phone, [*orders.EDITABLE, *orders.LOCKED])
     if order is None or "payment" not in order:
         return None
@@ -175,9 +178,19 @@ def _payment_state(phone: str) -> str | None:
     # Discarded receipts are listed too: left out, the line was silent about them
     # and the model kept the "en revisión" from the chat history.
     found = [r["status"] for r in pay["receipts"]]
-    parts = [PAYMENT_STATE.get(pay["method"], pay["method"])]
+    # Cash that paid it all comes first, with nothing about a transfer (C2 R2a, P-0644).
+    cash_paid_all = 0 < pay["total"] <= pay["cash_received"]
+    if cash_paid_all:
+        chosen = {"TRANSFER": "había elegido transferencia, pero ",
+                  "MIXED": "había elegido parte por transferencia y parte en efectivo, pero "}.get(pay["method"], "")
+        parts = [chosen + "el local ya recibió el pago completo en efectivo"]
+    else:
+        parts = [PAYMENT_STATE.get(pay["method"], pay["method"])]
+        if pay["cash_received"] > 0:
+            parts.append("el local ya recibió una parte en efectivo")
     if not found:
-        parts.append("no ha enviado ningún comprobante")
+        parts.append("no hace falta que transfiera ni que envíe comprobante" if cash_paid_all
+                     else "no ha enviado ningún comprobante")
     else:
         kinds = [
             ("PROOF_RECEIVED", "recibido", "recibidos", "que revisa una persona del local"),
@@ -191,7 +204,7 @@ def _payment_state(phone: str) -> str | None:
         ))
     if pay["under_review"]:
         parts.append("hay un comprobante en revisión: no le pidas que pague otra vez")
-    elif pay["method"] in ("TRANSFER", "MIXED"):
+    elif pay["method"] in ("TRANSFER", "MIXED") and not cash_paid_all:
         parts.append(
             "todavía falta por transferir" if pay["transfer_due"]
             else "ya no falta nada por transferir"
@@ -280,7 +293,7 @@ TOOLS = [
                 "item_id": {"type": "string", "description": "id exacto de la carta"},
                 "qty": {"type": "integer", "minimum": 1, "default": 1},
                 "modifier_ids": {"type": "array", "items": {"type": "string"}},
-                "note": {"type": "string", "description": "nota breve para la cocina"},
+                "note": {"type": "string", "description": "nota breve del cliente sobre el producto (ej: bien asada)"},
             },
             "required": ["item_id"],
         },
@@ -459,7 +472,9 @@ def _handoff(order: dict, summary: str, why: str) -> str:
     )
 
 
-def _payment_line(change: dict) -> str:
+def _payment_line(change: dict, transfer_due: int | None = None) -> str:
+    """What the edit result says about money. `transfer_due` is the value from
+    `payments.current()` after the edit; None means unknown."""
     if change.get("under_review"):
         return (
             " El local está revisando el comprobante que envió y se comunica con él. "
@@ -477,6 +492,15 @@ def _payment_line(change: dict) -> str:
             f" {paid_in}, {fmt(change['surplus'])} más que el nuevo total. No le prometas "
             "devolución: dile que el local revisa la diferencia y se comunica con él."
         )
+    if change.get("cash") and change.get("cash_due") and not change.get("sent"):
+        line = (f" Ya pagó {fmt(change['cash'])} en efectivo; quedan "
+                f"{fmt(change['cash_due'])} en efectivo al recibir.")
+        if transfer_due == 0:                     # C2 R7: a bare fact was left out of the reply
+            return line + (" Dile al cliente esas dos cifras: lo que ya pagó en efectivo y lo "
+                           "que le queda por pagar en efectivo al recibir. No le pidas "
+                           "transferencia ni comprobante, y no le preguntes cómo va a pagar.")
+        # A transfer is still owed (e.g. MIXED) or unknown: today's text (DECISION F1 = A, gap G29).
+        return line
     if change.get("missing"):
         return (
             f" Ya envió {fmt(change['sent'])}. Faltan {fmt(change['missing'])}: pídele el "
@@ -500,7 +524,8 @@ def _amended_text(order: dict, change: dict) -> str:
     )
     return (
         "Pedido actualizado. Es el MISMO pedido, no uno nuevo:\n"
-        + _order_text(order) + "\n" + state_line + _payment_line(change)
+        + _order_text(order) + "\n" + state_line
+        + _payment_line(change, (order.get("payment") or {}).get("transfer_due"))
         + " No le menciones ningún código."
     )
 
@@ -830,12 +855,15 @@ def _log_tool(phone: str, name: str, args: dict, output: str) -> None:
         print(line.encode("ascii", "backslashreplace").decode("ascii"), flush=True)
 
 
+MAX_TOOL_ROUNDS = 8
+
+
 def _reply_locked(phone: str, history: list, user_content) -> str:
     history.append({"role": "user", "content": user_content})
     _trim(history)
 
     text_out = []
-    for _ in range(8):  # tool-use rounds
+    for _ in range(MAX_TOOL_ROUNDS):  # tool-use rounds
         response = client().messages.create(
             model=model(),
             max_tokens=1024,
@@ -865,6 +893,22 @@ def _reply_locked(phone: str, history: list, user_content) -> str:
                     "content": output,
                 })
         history.append({"role": "user", "content": results})
+    else:
+        # The model still wanted tools after the last round, so the history ends on a
+        # tool result and the text above is only what it wrote before the tools answered:
+        # a guess. One more call with tools switched off makes it answer from what they
+        # returned, and only that answer's text may reach the customer. No text at all
+        # falls through to the fallback below.
+        response = client().messages.create(
+            model=model(),
+            max_tokens=1024,
+            system=system_prompt(phone),
+            tools=TOOLS,
+            messages=history,
+            tool_choice={"type": "none"},
+        )
+        history.append({"role": "assistant", "content": response.content})
+        text_out = [b.text.strip() for b in response.content if b.type == "text" and b.text.strip()]
 
     _trim(history)
     return "\n\n".join(text_out).strip() or "Perdón, ¿me lo repite?"

@@ -7,6 +7,7 @@ convincing six-minute demo, nothing more."""
 import base64
 import uuid
 import os
+import re
 import sqlite3
 import traceback
 from pathlib import Path
@@ -62,22 +63,73 @@ STOP_FALLBACK = {
     "CANCELLED": "Tuvimos que cancelar su pedido. {reason}",
 }
 
+# Rule 3: the customer never reads the order code or the word "cocina". SYSTEM forbids
+# both, but the model is not trusted with it: every reply goes through here.
+# Parentheses go only when they hold nothing but the code: "(su pedido P-4438)" keeps them.
+_CODE = r"(?:\(\s*#?[Pp]-\d+\s*\)|#?\b[Pp]-\d+\b)"
+ORDER_CODE = re.compile(r"[ \t]*" + _CODE)
+# A line that began with the code: the word after it now starts the sentence.
+CODE_AT_LINE_START = re.compile(r"(?m)^([ \t]*)" + _CODE + r"[ \t]*[:,.\-]?[ \t]*([¿¡]?)(\w)")
+KITCHEN = re.compile(
+    r"\b(?:(a|de)\s+)?(?:(la|una|esta|esa|nuestra|su|mi|tu)\s+)?cocina\b", re.IGNORECASE
+)
+DETERMINERS = {
+    "la": "el", "una": "un", "esta": "este", "esa": "ese", "nuestra": "nuestro",
+    "su": "su", "mi": "mi", "tu": "tu",
+}
+
+
+def _kitchen_to_local(match: re.Match) -> str:
+    """'la cocina' -> 'el local', 'a la cocina' -> 'al local', 'de nuestra cocina' ->
+    'de nuestro local': the determiner changes with the noun, so the sentence stays
+    grammatical."""
+    prep = (match.group(1) or "").lower()
+    det = DETERMINERS.get((match.group(2) or "").lower(), "el")
+    if prep and det == "el":
+        words = {"a": "al", "de": "del"}[prep] + " local"
+    else:
+        words = " ".join(w for w in (prep, det, "local") if w)
+    return words[0].upper() + words[1:] if match.group(0)[0].isupper() else words
+
+
+def _clean_for_customer(text: str) -> str:
+    """The text without order codes, and with 'cocina' said as 'el local'. Known
+    limit: 'cocina' used as a verb ('el chef cocina') would become 'el local'."""
+    text = CODE_AT_LINE_START.sub(lambda m: m.group(1) + m.group(2) + m.group(3).upper(), text)
+    text = ORDER_CODE.sub("", text)
+    text = re.sub(r"[ \t]+([,.;:!?])", r"\1", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return KITCHEN.sub(_kitchen_to_local, text)
+
+
+def _customer_safe(phone: str, text: str) -> str:
+    """The reply as the customer may read it. When it changed, the history is
+    corrected too, so the model never builds on words the customer did not get."""
+    clean = _clean_for_customer(text)
+    if clean != text:
+        brain.correct_last_reply(phone, clean)
+    return clean
+
 
 def _stop_message(order: dict, reason: str | None) -> str:
     """REJECTED and staff CANCELLED are mandatory messages, and a bare 'your
     order was cancelled' is not good enough. The model turns the staff's own
     words into something a customer can read, and falls back to a template if
     the model is unreachable."""
-    kind = "rechazado" if order["state"] == "REJECTED" else "cancelado por el local"
+    what = (
+        "rechazó el pedido del cliente antes de aceptarlo" if order["state"] == "REJECTED"
+        else "canceló el pedido del cliente después de haberlo aceptado"
+    )
     clean = (reason or "").strip()
     try:
-        return brain.reply(order["phone"], (
-            f"(El local {kind} el pedido del cliente. Motivo que escribió el personal: "
+        text = brain.reply(order["phone"], (
+            f"(El local {what}. Motivo que escribió el personal: "
             f"\"{clean or 'sin motivo indicado'}\". Escríbele al cliente un mensaje corto, "
             "amable y claro explicándole el motivo en palabras sencillas, y discúlpate. "
             "No le menciones ningún código de pedido. No inventes un motivo distinto. "
             "Si aplica, ofrécele hacer otro pedido.)"
         ))
+        return _customer_safe(order["phone"], text)
     except Exception:  # noqa: BLE001 - the customer must be told either way
         traceback.print_exc()
         template = STOP_FALLBACK[order["state"]]
@@ -140,6 +192,73 @@ def notify(order: dict, reason: str | None = None) -> None:
 
 # ---- one inbound message --------------------------------------------
 
+# What a message the bot cannot read is called in its note (_note_for).
+UNREADABLE = {
+    "video": "un video",
+    "document": "un documento",
+    "contacts": "un contacto",
+    "unsupported": "un mensaje que WhatsApp no deja ver",
+}
+
+
+def _note_for(message: dict, image_failed: bool) -> str | None:
+    """A message that is not text the bot can read reaches it as a bracketed note,
+    like the instructions in handle(): the API refuses an empty message, and the
+    bot must never pretend it understood a voice note or a sticker. None means the
+    message goes through as it is (text, a readable image, a button)."""
+    kind = message.get("kind")
+    if image_failed:
+        caption = (message.get("text") or "").strip()
+        wrote = f". Junto con ella escribió: «{caption}»" if caption else ""
+        return (
+            f"(El cliente envió una imagen, pero no se pudo descargar{wrote}. No digas que "
+            "la recibiste ni que la revisaste. Pídele con amabilidad que la envíe otra vez.)"
+        )
+    if kind == "audio":
+        return (
+            "(El cliente envió una nota de voz. No la puedes escuchar y no sabes qué dice: "
+            "nunca hagas como si la hubieras entendido. Dile con amabilidad que por ahora "
+            "no puedes escuchar notas de voz, pídele que lo escriba y sigue con su pedido.)"
+        )
+    if kind == "sticker":
+        return (
+            "(El cliente envió un sticker. No lo puedes ver y no sabes qué muestra: nunca "
+            "hagas como si lo hubieras entendido. Dile con amabilidad que por ahora no "
+            "puedes ver stickers; si quería decir algo, pídele que lo escriba, y sigue con "
+            "su pedido.)"
+        )
+    if kind in UNREADABLE:
+        return (
+            f"(El cliente envió {UNREADABLE[kind]}. No lo puedes abrir y no sabes qué "
+            "contiene: nunca hagas como si lo hubieras entendido. Dile con amabilidad que "
+            "por ahora solo puedes leer mensajes de texto y fotos, pídele que lo escriba y "
+            "sigue con su pedido.)"
+        )
+    if kind == "location":
+        place = message.get("location") or {}
+        latitude, longitude = place.get("latitude"), place.get("longitude")
+        details = [
+            f"nombre: {place['name']}" if place.get("name") else None,
+            f"dirección: {place['address']}" if place.get("address") else None,
+            f"coordenadas: {latitude}, {longitude}"
+            if latitude is not None and longitude is not None else None,
+            f"enlace: {place['url']}" if place.get("url") else None,
+        ]
+        tail = (
+            "Si quiere domicilio, usa esa dirección para la entrega; si no dice el barrio, "
+            "pregúntaselo, porque el valor del domicilio depende del barrio. Confírmale la "
+            "dirección."
+            if place.get("address") else
+            "No trae una dirección escrita: pídele con amabilidad la dirección escrita "
+            "(calle, número y barrio)."
+        )
+        return (
+            f"(El cliente compartió una ubicación de WhatsApp: {'; '.join(d for d in details if d)}. "
+            f"{tail} Nunca inventes una dirección a partir de las coordenadas.)"
+        )
+    return None
+
+
 def handle(
     phone: str, text: str | None, image: dict | None, received_at: str | None = None
 ) -> str:
@@ -149,7 +268,13 @@ def handle(
     stamp inbound_messages with it) - the reference point for the proof's date
     check, so the OCR call's own latency never eats into the customer's window."""
     if image is None:
-        return brain.reply(phone, text or "")
+        if not (text or "").strip():
+            # The API refuses an empty message; the model still has to answer something.
+            text = (
+                "(El cliente envió un mensaje sin texto. Pregúntale con amabilidad en qué "
+                "le puedes ayudar.)"
+            )
+        return brain.reply(phone, text)
 
     order = orders.latest_for(
         phone,
@@ -251,21 +376,28 @@ async def inbound(request: Request):
             )
         except sqlite3.IntegrityError:
             continue                              # duplicate delivery: exactly one row
+        if message.get("kind") == "reaction":
+            continue                              # an emoji on a message needs no answer
 
         image = None
+        image_failed = False
         if message.get("media_id"):
             downloaded = wa.download_media(message["media_id"])
             if downloaded:
                 image = wa.image_block(*downloaded)
+            else:
+                image_failed = True
+        # Not text the bot can read: it gets a note instead of the (empty) text.
+        text = _note_for(message, image_failed) or message.get("text")
         try:
-            reply = handle(phone, message.get("text"), image, received_at)
+            reply = handle(phone, text, image, received_at)
         except brain.NotConfigured as exc:
             print(f"\n!! {exc}\n", flush=True)
             reply = "Perdón, el sistema está en mantenimiento. Intente en unos minutos."
         except Exception:  # noqa: BLE001
             traceback.print_exc()
             reply = "Perdón, se me cruzaron los cables. ¿Me repite el pedido?"
-        wa.send_text(phone, reply)
+        wa.send_text(phone, _customer_safe(phone, reply))
 
     return {"ok": True}
 
@@ -304,6 +436,7 @@ async def sim_message(request: Request):
     except Exception as exc:  # noqa: BLE001
         traceback.print_exc()
         return JSONResponse({"error": str(exc)}, status_code=500)
+    reply = _customer_safe(phone, reply)
     wa.send_text(phone, reply)
     return {"reply": reply}
 
@@ -365,7 +498,7 @@ NEEDS_REASON = {"staff_rejects", "staff_cancels"}
 @app.post("/api/orders/{order_id}/event")
 async def order_event(order_id: int, request: Request):
     body = await request.json()
-    event = body["event"]
+    event = body.get("event")
     reason = (body.get("reason") or "").strip()
     if event in NEEDS_REASON and not reason:
         return JSONResponse(
@@ -390,11 +523,12 @@ async def resolve_handoff(order_id: int):
 
 def _payment_confirm_message(record: dict) -> str:
     """Built from the numbers code just computed. Never claims more than was
-    confirmed. A transfer above a MIXED order's agreed part lowers the cash still
-    owed (current()), so a surplus only appears once the receipts plus the
-    registered cash cover more than the total. While another receipt still waits
-    for a person it says so instead of quoting a balance: that money may already
-    be on its way."""
+    confirmed. While another receipt still waits for a person it says so instead of
+    quoting a balance: that money may already be on its way. Otherwise it says what is
+    still owed, split into what goes by transfer and what is paid in cash on delivery,
+    and asks for a receipt only when a transfer is owed. A surplus is only what the
+    confirmed receipts plus the registered cash cover beyond the total
+    (confirmed_overpayment): a receipt nobody confirmed yet may turn out wrong."""
     amount = fmt(record["receipt"]["confirmed_amount"])
     parts = []
     pending = [r for r in record["receipts"] if r["status"] in ("PROOF_RECEIVED", "FLAGGED")]
@@ -404,15 +538,23 @@ def _payment_confirm_message(record: dict) -> str:
             "El otro comprobante que envió sigue en revisión."
         )
     elif record["outstanding"] > 0:
-        parts.append(
-            f"Confirmamos su transferencia de {amount}. "
-            f"Quedan {fmt(record['outstanding'])} por pagar en efectivo al recibir."
-        )
-    if record["overpayment_amount"] > 0:
-        parts.append(
-            f"Confirmamos su pago. Vimos que envió {fmt(record['overpayment_amount'])} de más; "
+        text = f"Confirmamos su transferencia de {amount}."
+        due = []
+        if record["transfer_due"]:
+            due.append(f"{fmt(record['transfer_due'])} por transferir")
+        if record["cash_due"]:
+            due.append(f"{fmt(record['cash_due'])} por pagar en efectivo al recibir")
+        if due:
+            text += f" Quedan {' y '.join(due)}."
+        if record["transfer_due"]:
+            text += " Cuando haga la transferencia, envíenos el comprobante."
+        parts.append(text)
+    if record["confirmed_overpayment"] > 0:
+        surplus = (
+            f"Vimos que envió {fmt(record['confirmed_overpayment'])} de más; "
             "el local se va a comunicar con usted por el excedente."
         )
+        parts.append(surplus if parts else "Confirmamos su pago. " + surplus)
     if not parts:
         parts.append("Confirmamos su pago. ¡Gracias!")
     return " ".join(parts)

@@ -22,8 +22,8 @@ This project is the MVP of Zolvion Restaurant: a WhatsApp ordering system for
 restaurants that Miguel demos to restaurant owners and sells as a SaaS. The code lives
 in the local folder `zolvion-demo` (Python, FastAPI, SQLite, the Anthropic API, the
 WhatsApp Cloud API, three static HTML pages). First prospect: Caseritas Burger,
-Bucaramanga. Tasks A, B and C are done; Task D (Chatwoot) and a notifications bell are
-planned.
+Bucaramanga. Tasks A, B, C and C2 Part 1 (code-review fixes) are done; C2 Part 2 (a
+"Pagos" block), Task D (Chatwoot) and a notifications bell are planned.
 
 Read README_1.md first. It maps every other document.
 

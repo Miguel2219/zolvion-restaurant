@@ -20,12 +20,20 @@ UNSPECIFIED = "UNSPECIFIED"
 
 
 def set_method(order_id: int, method: str, transfer_amount=None, cash_amount=None) -> dict:
-    order = db.q1("SELECT total FROM orders WHERE id=?", (order_id,))
-    if order is None:
-        raise PaymentError("order not found")
-    total = order["total"]
+    """The customer's choice of how to pay: only a method the business enables."""
     if method not in CATALOG.payments.get("methods", []):
         raise PaymentError(f"{method} no está habilitado en este negocio.")
+    return _apply_split(order_id, method, transfer_amount, cash_amount)
+
+
+def _apply_split(order_id: int, method: str, transfer_amount=None, cash_amount=None) -> dict:
+    """Writes a method and its split for the order's current total. It re-splits a
+    method the order already has; it never checks the config (cash registration can
+    write CASH when the config leaves it out)."""
+    order = db.q1("SELECT total FROM orders WHERE id=?", (order_id,))
+    if order is None:
+        raise PaymentError("Ese pedido no existe.")
+    total = order["total"]
 
     if method == "CASH":
         transfer, cash = 0, total
@@ -51,7 +59,7 @@ def set_method(order_id: int, method: str, transfer_amount=None, cash_amount=Non
         if transfer < 0 or cash < 0:
             raise PaymentError("Los montos no pueden ser negativos.")
     else:
-        raise PaymentError(f"método desconocido: {method}")
+        raise PaymentError(f"Método de pago desconocido: {method}.")
 
     db.run(
         "UPDATE payments SET method=?, transfer_amount=?, cash_amount=?, updated_at=?"
@@ -61,23 +69,22 @@ def set_method(order_id: int, method: str, transfer_amount=None, cash_amount=Non
     return current(order_id)
 
 
-def _expectation(order_id: int) -> tuple[int, bool]:
+def _expectation(before: dict) -> tuple[int | None, bool]:
     """(amount the proof should match, whether the method may be inferred from it).
 
+    `before` is current(). Registered cash already paid part of the order, so only
+    what it has not covered can still arrive by transfer; None means cash paid it all.
     A transfer that was actually agreed - TRANSFER, or MIXED with a transfer part -
-    is the expectation, and the method stays as the customer chose it. When no
-    transfer was agreed (UNSPECIFIED, or CASH), the customer is transferring anyway,
-    so the order total is the expectation and the method follows the proof."""
-    row = db.q1(
-        "SELECT p.method AS method, p.transfer_amount AS agreed, o.total AS total"
-        " FROM payments p JOIN orders o ON o.id = p.order_id WHERE p.order_id=?",
-        (order_id,),
-    )
-    if row is None:
-        raise PaymentError("no payment record")
-    if row["method"] in ("TRANSFER", "MIXED") and row["agreed"] > 0:
-        return row["agreed"], False
-    return row["total"], True
+    is the expectation (capped at that), and the method stays as the customer chose
+    it. When no transfer was agreed (UNSPECIFIED, or CASH), the customer is
+    transferring anyway, so what is left is the expectation and the method follows
+    the proof."""
+    left = before["total"] - before["cash_received"]    # what registered cash has not covered
+    if left <= 0:
+        return None, False                              # R1: cash already paid it all
+    if before["method"] in ("TRANSFER", "MIXED") and before["transfer_amount"] > 0:
+        return min(before["transfer_amount"], left), False
+    return left, True
 
 
 def _check_date(extracted: dict, received_at: str, created_at: str) -> tuple[list[str], list[str]]:
@@ -230,7 +237,7 @@ def _expected_for_new_receipt(order_id: int, before: dict) -> tuple[int | None, 
     `before` is current() taken before the new receipt is stored. None means
     nothing is owed by transfer."""
     if not any(r["status"] in ("PROOF_RECEIVED", "CONFIRMED") for r in before["receipts"]):
-        return _expectation(order_id)          # first receipt, or only red/discarded ones before (Q1)
+        return _expectation(before)            # first receipt, or only red/discarded ones before (Q1)
     if before["transfer_due"] > 0:
         return before["transfer_due"], False   # the "Faltan $X" the bot asked for
     if before["method"] == "MIXED" and before["cash_due"] > 0:
@@ -296,7 +303,7 @@ def check_proof(
         (order_id,),
     )
     if row is None:
-        raise PaymentError("no payment record")
+        raise PaymentError("Ese pedido no tiene registro de pago.")
     before = current(order_id)
     expected, may_infer = _expected_for_new_receipt(order_id, before)
     flags: list[str] = []
@@ -315,11 +322,15 @@ def check_proof(
     elif amount is None:
         flags.append("No se pudo leer el monto en el comprobante.")
     elif may_infer:
-        # No transfer was agreed. The proof itself says what they paid.
-        if amount == expected:
+        # No transfer was agreed. The proof itself says what they paid. Only with no
+        # cash registered can it be all of it by transfer; with cash, a transfer for
+        # the whole total is more than what was left, and that is red.
+        if amount == expected == before["total"]:
             inferred = ("TRANSFER", amount, 0)
-        elif 0 < amount < expected:
-            inferred = ("MIXED", amount, expected - amount)
+        elif 0 < amount <= expected:
+            inferred = ("MIXED", amount, before["total"] - amount)
+        elif before["cash_received"]:
+            flags.append(f"El comprobante dice {fmt(amount)} y faltaban {fmt(expected)}.")
         else:
             flags.append(
                 f"El comprobante dice {fmt(amount)} y el pedido es de {fmt(expected)}."
@@ -498,11 +509,11 @@ def follow_total(order_id: int) -> dict:
     if not any(r["status"] in ("PROOF_RECEIVED", "CONFIRMED") for r in before["receipts"]):
         # Nothing counts yet (no receipt, or only red/discarded ones).
         if method in ("CASH", "TRANSFER"):
-            set_method(order_id, method)
+            _apply_split(order_id, method)
         elif method == "MIXED":
             agreed = before["transfer_amount"]
             if agreed < total:
-                set_method(order_id, "MIXED", transfer_amount=agreed)
+                _apply_split(order_id, "MIXED", transfer_amount=agreed)
             else:
                 db.run(
                     "UPDATE payments SET method='UNSPECIFIED', transfer_amount=0, cash_amount=0,"
@@ -512,6 +523,7 @@ def follow_total(order_id: int) -> dict:
                 change["ask_method"] = True
         after = current(order_id)
         change.update(cash=after["cash_received"], surplus=after["overpayment_amount"])
+        change["cash_due"] = after["cash_due"] if after["cash_received"] else 0
         return change
 
     if method == "MIXED":
@@ -579,14 +591,16 @@ def current(order_id: int) -> dict:
         (order_id,),
     )
     if row is None:
-        raise PaymentError("no payment record")
+        raise PaymentError("Ese pedido no tiene registro de pago.")
     data = dict(row)
     total = data["total"]
     found = receipts(order_id)
     states = {r["status"] for r in found}
 
     sent = sum(r["counted"] for r in found)
-    transfer_due = max(data["transfer_amount"] - sent, 0)
+    # Registered cash already paid part of the order, so the agreed transfer can't
+    # exceed what the cash has not covered: that is all that is still owed by transfer.
+    transfer_due = max(min(data["transfer_amount"], total - data["cash_received"]) - sent, 0)
     cash_due = max(total - sent - data["cash_received"] - transfer_due, 0)
     # The one place that says how much is paid - every caller reads this instead
     # of computing its own. Confirmed receipts count, and cash counts once staff
@@ -613,6 +627,9 @@ def current(order_id: int) -> dict:
         **data, "receipts": found, "sent": sent, "transfer_due": transfer_due,
         "cash_due": cash_due, "paid": paid, "outstanding": max(total - paid, 0),
         "overpayment_amount": max(sent + data["cash_received"] - total, 0),
+        # The same surplus counting only what a person confirmed: a receipt that still
+        # waits may turn out wrong, so the customer is never told about it as a surplus.
+        "confirmed_overpayment": max(confirmed + data["cash_received"] - total, 0),
         "unconfirmed_amount": unconfirmed, "status": status,
         "under_review": "FLAGGED" in states,
     }

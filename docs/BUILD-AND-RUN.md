@@ -32,8 +32,8 @@ pip install -r requirements.txt
 copy .env.example .env      # then fill it in
 ```
 
-The virtualenv folder is `venv/`; `.gitignore` ignores only `.venv/` (`KNOWN-GAPS.md`
-G8). If PowerShell blocks activation: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+The virtualenv folder is `venv/` (ignored by git). If PowerShell blocks activation:
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
 ## 3. Environment (`.env`)
 
@@ -55,7 +55,7 @@ G8). If PowerShell blocks activation: `Set-ExecutionPolicy -Scope CurrentUser Re
 ```powershell
 uvicorn app.main:app --reload --port 8000
 
-python -m pytest tests -q                                    # all tests (210)
+python -m pytest tests -q                                    # all tests (263 pass, 1 xfail)
 python -m pytest tests -q -k wrong_amount                    # by name
 python -m pytest tests/test_flow.py::test_happy_path_pickup  # one test
 ```
@@ -69,8 +69,10 @@ Pages: `http://localhost:8000/simulator`, `/kitchen` (also `/`), `/reports`.
 
 ## 5. Tests
 
-- `tests/test_flow.py` sets `DEMO_DB` to a temporary file **before** importing `app`;
-  the database path is fixed at import time.
+- Two files: `tests/test_flow.py` (behaviour by area) and `tests/test_review_bugs.py`
+  (one or more tests per code-review defect R1–R12, `CURRENT-STATE.md` §3). Each sets
+  `DEMO_DB` to a temporary file **before** importing `app`; the database path is fixed at
+  import time. `test_review_bugs.py` refuses to run against the real `demo.sqlite3`.
 - An autouse fixture wipes every table between tests.
 - No AI calls: tests call cart, order, payment, report and tool functions directly
   (`brain._run_tool`, `main.handle` with `extract_proof` and `reply` replaced), and read
@@ -85,7 +87,9 @@ Pages: `http://localhost:8000/simulator`, `/kitchen` (also `/`), `/reports`.
   payment-method changes; final response text; notifications.
 - Not covered: what the AI decides (tool choice, wording). The Notion checklists and
   `TEST.md` test that by hand.
-- Result on 2026-10-01: 210 passed, 3 deprecation warnings (`on_event`).
+- Result on 2026-10-07: 263 passed, 1 xfailed (the G16 expected failure in
+  `tests/test_review_bugs.py`), 3 deprecation warnings (two from `on_event`, one from
+  Starlette's test client).
 
 ## 6. Connecting real WhatsApp
 
