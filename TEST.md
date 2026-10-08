@@ -6,9 +6,8 @@
 - **Part D** — automated tests.
 
 The full per-task checklists, with Miguel's verdicts, are the Notion pages
-"Task A/B/C Plan" and "Task C2 Plan (Part 1: bug fixes)" (Zolvion - Demo Documentation ›
-Tasks). Expected totals come from
-`config/restaurant.json`: change a price and they change too.
+"Task A/B/C Plan" and "Task C2 Plan" Parts 1 and 2 (Zolvion - Demo Documentation › Tasks).
+Expected totals come from `config/restaurant.json`: change a price and they change too.
 
 ---
 
@@ -123,11 +122,12 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
 - After `Sí, confirmo` the bot only says it is confirmed, never "enviado al local".
 - No message ever shows `P-1234`, the word "cocina", or says the bot confirmed a payment.
 
-### C5 · Receipts (each one is its own row: time, amount, status, 👁)
+### C5 · Receipts (each one is its own row in "Pagos": time, amount, status, 👁)
 - 👁 opens the photo; click outside or Esc closes it.
 - Add a gaseosa after a clean receipt → the bot asks for exactly $3.500 and shows the
   accounts; a $3.500 transfer → a second clean row. Another amount → only that row is red.
-- Same screenshot again on the same order → no new row; "ya lo teníamos".
+- Same screenshot again on the same order → no new row; "ya lo teníamos" (if staff had
+  discarded it: the bot gives their reason again, never "ya lo teníamos").
 - Same reference, different amount (edited image) → red "ya fue usado antes", photo kept.
 - No method chosen: old screenshot, then a new one for the total → second row clean with the
   grey note "Llegó mientras otro comprobante está en revisión"; the method tag changes only
@@ -144,16 +144,16 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
 
 ### C6 · Staff actions on a receipt
 - Confirmar opens with that receipt's amount ("Monto que realmente llegó…"); $0 is refused
-  with a pointer to Descartar. Confirming one of two → "Confirmamos su transferencia de $X.
+  with a pointer to the X. Confirming one of two → "Confirmamos su transferencia de $X.
   El otro comprobante que envió sigue en revisión." and "Pago incompleto · faltan $Y".
 - Confirming a red row → its text stays as a grey "✓ Revisado" line.
 - Partial transfer confirmed on a transfer order → "…Quedan $X por transferir. Cuando haga
   la transferencia, envíenos el comprobante.", nothing about cash; on a mixed order →
   "…Quedan $Y por pagar en efectivo al recibir."
-- Descartar asks for a reason (empty = refused, nothing sent) → grey row, "Descartado",
-  "Motivo: …", no buttons, no money; one short message to the customer with the reason;
-  `¿Cómo va mi pedido?` never says it is still under review. Its 👁 still works, and the
-  same screenshot on a new order is red "ya fue usado antes".
+- ✕ on a waiting receipt asks for a reason (empty = refused, nothing sent) → the row leaves
+  the card; one short message to the customer with the reason; `¿Cómo va mi pedido?` never
+  says it is still under review; the same screenshot on a new order is red "ya fue usado
+  antes". A confirmed receipt has no ✕.
 
 ### C7 · Cash
 - Cash order $22.400: the dialog opens with $22.400; $30.000 is refused with «El monto es
@@ -161,9 +161,12 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
 - The amount box (Confirmar and Registrar efectivo) is a plain text box with no spinner
   arrows: `22.400`, `$22.400` and `22400` register $22.400; `22400.5` and `2,5` are refused with
   "Escriba el monto en pesos, sin decimales…" and nothing is stored.
-- $52.300 order with a clean, unconfirmed $30.000 receipt → the dialog warns "Hay
-  comprobantes sin confirmar por $30.000…"; registering $52.300 shows "Sobrepago $30.000";
-  confirming the receipt sends "…envió $30.000 de más; el local se va a comunicar…".
+- Each registration is its own row ("Efectivo recibido", ✕): $5.000 then $2.400 on a
+  Caserita → two rows, "faltan $11.500". ✕ needs a reason, sends nothing; the tags go back.
+  No method chosen: the tag returns to "Sin especificar" only when the last cash row goes.
+- $52.300 order with a clean, unconfirmed $30.000 receipt → no warning in the dialog;
+  registering $52.300 shows "Sobrepago $30.000" (G32); confirming the receipt sends
+  "…envió $30.000 de más; el local se va a comunicar…".
 - No method chosen, register the full total → "Efectivo" and "Pago completo", no "Sin
   comprobante"; the bot never asks how they pay; `mejor lo pago por transferencia` → amber
   box, method unchanged; `lo pago en efectivo` → "no cambió nada".
@@ -178,14 +181,16 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
 - Columns Nuevos · Recibidos · Listos · En camino; "Volver a preparar" returns to Recibidos.
 - No receipt state ever blocks Aceptar, Listo, Sale a domicilio or Entregado.
 - Reports: "Comprobantes marcados"/"por confirmar" count all time, discarded excluded;
-  "Hoy" is the Bucaramanga calendar day; "Sin confirmar" shows orders waiting for the "sí".
+  "Hoy" is the Bucaramanga calendar day; "Sin confirmar" shows orders waiting for the "sí";
+  "Cómo pagaron" by money received (cash, confirmed transfers), plus confirmed
+  overpayments and payments on cancelled/rejected orders.
 - Leaving the simulator and coming back keeps the whole conversation.
 - Last: copy a photo address, Reiniciar demo → that address shows "Sin foto".
 
 ## Part D — automated tests
 
-`python -m pytest tests -q` → **263 passed, 1 xfailed** (Task B ended with 147, Task C
-with 210; the xfail is G16, out of scope for C2 Part 1).
+`python -m pytest tests -q` → **306 passed, 1 xfailed** (Task B ended with 147, Task C
+with 210, C2 Part 1 with 263; the xfail is G16, out of scope).
 
 ## Before the demo
 

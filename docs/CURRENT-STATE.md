@@ -1,8 +1,8 @@
 # Current state
 
-Snapshot: code last changed 2026-10-04 (Task C2 Part 1 and its 4 Oct follow-up). Tests
-run 2026-10-07: 263 pass, 1 expected failure (G16). Notion checklists, all ✅: Task A
-2026-09-23, Tasks B and C 2026-09-30, Task C2 Part 1 2026-10-06 (Bogotá time).
+Snapshot: code last changed 2026-10-07 (Task C2 Part 2, the "Pagos" block). Tests run
+2026-10-07: 306 pass, 1 expected failure (G16). Notion checklists ✅: Task A 2026-09-23,
+Tasks B and C 2026-09-30, Task C2 Part 1 2026-10-06 (Bogotá time). C2 Part 2: not yet run.
 
 ---
 
@@ -31,8 +31,10 @@ run 2026-10-07: 263 pass, 1 expected failure (G16). Notion checklists, all ✅: 
   staff counts toward what is owed by transfer. The bot says "received, a person will
   review it" or "there is a problem, a person will check"; never "confirmed" unless a
   person confirmed it.
-- "¿Cómo va mi pedido?" and payment questions answer from the real state (ESTADO REAL),
-  not from the chat history.
+- What the bot says about money (after an edit, a clean receipt, a method choice, a payment
+  question) is a sentence code builds from the real state and the bot copies; every reply
+  that speaks about payment is checked before it goes out (`payments.md` §7). A payment
+  question reads the state fresh; a delivered or cancelled order's payment is "not verified".
 - Automatic messages: accepted, ready (pickup), out for delivery; AI-written messages for
   staff reject/cancel and discarded receipts, from the staff's reason; a code-built
   message when staff confirm a receipt.
@@ -45,10 +47,12 @@ run 2026-10-07: 263 pass, 1 expected failure (G16). Notion checklists, all ✅: 
 - Tags: method, receipt status ("Sin comprobante" only on transfer/mixed), Sin pagar /
   Pago incompleto · faltan $X / Pago completo, Efectivo por cobrar, Sobrepago,
   Actualizado, pedido aparte, delivery fee.
-- "Comprobantes" block: one row per receipt with time, amount, status, 👁 photo, grey
-  notes, red box with reasons, Confirmar / Descartar while it waits for a person.
-- "Registrar efectivo recibido": prefilled, capped at what is owed, warns about receipts
-  not yet confirmed. Amount boxes read "22.400" and "$22.400" as $22.400 and refuse
+- "Pagos" block: receipts and cash registrations, oldest first. A receipt row has time,
+  amount, status, 👁 photo, grey notes, red box with reasons, Confirmar and ✕ while it waits
+  for a person; a cash row has time, amount, "Efectivo recibido" and ✕. ✕ needs a reason; a
+  discarded row leaves the card (a receipt's customer is told, cash tells nobody).
+- "Registrar efectivo recibido": prefilled, capped at what is owed, one row per
+  registration, no warning. Amount boxes read "22.400" and "$22.400" as $22.400 and refuse
   decimals.
 - Amber "🙋 Necesita a una persona" box with "Ya lo atendí".
 - Red pulse for a Nuevos order older than 600 s (`/kitchen?alert=20` for demos).
@@ -58,8 +62,9 @@ run 2026-10-07: 263 pass, 1 expected failure (G16). Notion checklists, all ✅: 
 ### Reports (`/reports`) and simulator (`/simulator`)
 
 - Reports for today (Bogotá calendar day), 7 or 30 days: sales, orders, average ticket,
-  delivery fees, top 5 items, how they paid, pickup vs delivery, lost orders, orders
-  waiting for the "sí", receipts flagged and awaiting (these two all time).
+  delivery fees, top 5 items, how they paid (by money that really came in), confirmed
+  overpayments, payments on cancelled/rejected orders, pickup vs delivery, lost orders,
+  orders waiting for the "sí", receipts flagged and awaiting (these two all time).
 - The simulator is a fake WhatsApp chat with image upload; the conversation is rebuilt
   from the database; `?phone=` picks the number (default `573001112233`).
 
@@ -75,7 +80,7 @@ Each task has a Notion "Task X Plan" checklist that Miguel tests by hand (`WORKF
 | B | Remove "En preparación"; edit an unaccepted order in place; hand off changes to accepted orders; payment follows an edit; second receipt; payment-method changes. Fix round 1 (28 Sep): code-decided routing, `request_handoff` gate, line merge and targeting, one reply per message, "aceptado por el local" wording, grey "Revisado". Fix round 2 (29 Sep): "hablar con una persona", ESTADO REAL | Done: 55/55 ✅ (147 tests) |
 | C | One row per receipt with its own checks, photo and Confirmar; database-checked reference for every receipt; resend vs reuse; Descartar with reason; cash capped at what is owed; surplus counts cash; cash settles an unspecified method; ESTADO REAL payment line (P-2465, P-0458, P-6455, P-4766 fixes) | Done: 40/40 ✅ (210 tests) |
 | C2 Part 1 | Fixes for the 1 Oct code review, R1–R12 and R3b (§3): cash counts toward what is owed by transfer, confirm message, a modifier added twice, non-text messages, Spanish errors, order creation in one transaction, replies cleaned of the order code and "cocina", stop instruction, last model call, amounts typed by staff. Follow-up (4 Oct): R2a and R7 failed the first manual run; the bot's payment text was fixed | Done: 18/18 ✅ (263 tests). Re-runs 4 and 6 Oct |
-| C2 Part 2 | Planned. A "Pagos" block, one row per payment; G29 belongs here | No checklist yet |
+| C2 Part 2 | "Pagos" block: one row per cash registration, ✕ to discard a receipt or cash (reason; a method only cash set goes back with the last cash row), no cash warning; code-built payment sentence copied verbatim and checked at the end of every turn (G29, G30, R1 wording; Gaps 1–7 decided 7 Oct); "Cómo pagaron" by money received (G27) | Code done 2026-10-07 (306 tests); Notion checklist not yet run |
 | D | Planned. Chatwoot: a handoff opens a conversation a person answers in the same WhatsApp chat; the bot stays silent for that customer until the person closes it | Not started |
 | — | Planned as its own task: a notifications bell, so a customer with no card who asks for a person reaches someone | Not started |
 
@@ -113,9 +118,11 @@ panel or in the simulator shows it.
 
 ## 4. Tests
 
-`tests/test_flow.py`: 174 test functions, **210 test cases** with parameters, all passing.
-`tests/test_review_bugs.py` (Task C2 Part 1): 28 test functions, 54 cases, one or more per
-defect of §3 plus the 4 Oct follow-up; 53 pass, and `test_g16_order_code_loop_is_bounded`
-stays an expected failure (G16, out of scope). Together **263 passed, 1 xfailed**
-(2026-10-07; 3 deprecation warnings: two from FastAPI's `on_event`, one from Starlette's
-test client). No AI calls happen in tests. Areas: `BUILD-AND-RUN.md` §5.
+`tests/test_flow.py`: Tasks A–C plus the C2 Part 2 section (cash rows and the ✕, Gaps 1–7,
+the payment sentence, the end-of-turn check with a scripted model, reports, schema), **253
+cases**, all passing. `tests/test_review_bugs.py` (Task C2 Part 1): one or more tests per
+defect of §3 plus the 4 Oct follow-up, **54 cases**: 53 pass, and
+`test_g16_order_code_loop_is_bounded` stays an expected failure (G16, out of scope).
+Together **306 passed, 1 xfailed** (2026-10-07; 3 deprecation warnings: two from FastAPI's
+`on_event`, one from Starlette's test client). No AI calls happen in tests. Areas:
+`BUILD-AND-RUN.md` §5.

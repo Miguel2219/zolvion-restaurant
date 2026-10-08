@@ -35,8 +35,8 @@ references in its comments mean.
    telling the model to offer something real.
 8. **Every order move goes through `orders.TRANSITIONS`** and is logged in
    `order_transitions`. That table is never updated or deleted from (except the reset).
-9. **Staff reject/cancel and receipt discards need a reason**, because the customer
-   receives it.
+9. **Staff reject/cancel, receipt discards and cash discards need a reason.** The customer
+   receives it for the first three; a cash discard tells nobody and the reason stays on the row.
 10. **Webhook signature is checked on the raw body before anything else** (when
     `WHATSAPP_APP_SECRET` is set).
 11. **The system decides, not the model.** Whether a change edits the order or goes to a
@@ -98,8 +98,8 @@ task plans. Those documents are **not** part of this project. What each means he
 |---|---|
 | `R3` (`db.py`) | Duplicate protection lives in the database (unique WhatsApp message id) |
 | `R9` (`wa.py`) | A record of every outbound message is written first (`outbound_messages`). The retries that rule also asks for are not built |
-| `R1` (`payments.py`), `C2 R2a`, `C2 R7` (`brain.py`); `test_r1_…` to `test_r12_…` | Not the old design's rules: defects R1–R12 of the 1 Oct code review, `CURRENT-STATE.md` §3 |
-| DECISION F1 = A (`brain.py`) | C2 Part 1 follow-up decision (4 Oct): a MIXED order that still owes a transfer keeps the old edit line (`KNOWN-GAPS.md` G29) |
+| `R1` (`payments.py`), `C2 R2a` (`brain.py`); `test_r1_…` to `test_r12_…` | Not the old design's rules: defects R1–R12 of the 1 Oct code review, `CURRENT-STATE.md` §3 |
+| Gap 1 … Gap 7 (`payments.py`, `brain.py`) | Miguel's 7 Oct decisions for C2 Part 2: 1 the method after discarding cash, 2 a discarded receipt sent again, 3 the sentence copied verbatim, 4 what it says, 5 fresh answers to payment questions, 6 discarded cash in ESTADO REAL, 7 "Cómo pagaron" (`payments.md`) |
 | `Invariant 6` | Rule 6 above: total = lines + fee, computed by code |
 | `order-modification.md` / "window 1/2/3" | The modification windows, `ORDER-LIFECYCLE.md` §3 |
 | `notifications-and-followups.md §1` | Who gets told what, `ORDER-LIFECYCLE.md` §5 |

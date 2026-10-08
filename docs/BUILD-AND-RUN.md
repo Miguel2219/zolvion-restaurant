@@ -75,19 +75,22 @@ Pages: `http://localhost:8000/simulator`, `/kitchen` (also `/`), `/reports`.
   import time. `test_review_bugs.py` refuses to run against the real `demo.sqlite3`.
 - An autouse fixture wipes every table between tests.
 - No AI calls: tests call cart, order, payment, report and tool functions directly
-  (`brain._run_tool`, `main.handle` with `extract_proof` and `reply` replaced), and read
-  notifications back from `outbound_messages` in FAKE mode. Some tests read
-  `static/kitchen.html` to check panel strings.
+  (`brain._run_tool`, `main.handle` with `extract_proof` and `reply` replaced), or replace
+  the model with a scripted one (`_scripted`: fixed answers and tool calls, every call's
+  arguments kept) to test whole turns. Notifications are read back from
+  `outbound_messages` in FAKE mode. Some tests read `static/*.html` for panel strings.
 - Expected amounts come from the config, so a price change fails tests on purpose.
 - Areas: money; cart, line merge and targeting; state machine; payments and receipt
   checks; receipt dates; account matching; confirm, discard and cash; cash settling the
   method and ESTADO REAL; reports; modification windows; the removed preparation step;
   editing in place; handoffs and the `request_handoff` gate; "hablar con una persona";
   vocabulary; payment after an edit; one row per receipt; the clean-receipt reply;
-  payment-method changes; final response text; notifications.
-- Not covered: what the AI decides (tool choice, wording). The Notion checklists and
+  payment-method changes; final response text; notifications; C2 Part 2 (cash rows and
+  the ✕, the method after a cash discard, the payment sentence, the end-of-turn payment
+  check, "Cómo pagaron").
+- Not covered: what the real AI decides (tool choice, wording). The Notion checklists and
   `TEST.md` test that by hand.
-- Result on 2026-10-07: 263 passed, 1 xfailed (the G16 expected failure in
+- Result on 2026-10-07: 306 passed, 1 xfailed (the G16 expected failure in
   `tests/test_review_bugs.py`), 3 deprecation warnings (two from `on_event`, one from
   Starlette's test client).
 

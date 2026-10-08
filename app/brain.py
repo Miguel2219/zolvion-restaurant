@@ -6,12 +6,14 @@ total. Every tool below returns text that code built."""
 
 import json
 import os
+import re
 import threading
+import traceback
 
 from anthropic import Anthropic
 
 from . import cart, db, handoff, orders, payments
-from .catalog import CATALOG
+from .catalog import CATALOG, _fold
 from .money import fmt
 
 _client = None
@@ -158,7 +160,15 @@ PAYMENT_RULES = (
     "va a pagar ni le digas que no tiene pago registrado. Si aquí dice que el local ya "
     "recibió el pago completo en efectivo, el pedido ya está pagado aunque antes haya "
     "elegido transferencia: nunca le pidas que transfiera ni que envíe un comprobante, "
-    "ni le des las cuentas para pagar."
+    "ni le des las cuentas para pagar. "
+    "Si aquí dice que el local anuló un registro de efectivo, no lo menciones si el cliente "
+    "no pregunta por eso. Si pregunta por ese pago o por qué cambió lo que le falta, dile que "
+    "el local anuló ese registro de efectivo. Nunca digas que se le devolvió dinero ni que no "
+    "entregó el dinero. Si antes dijiste que el pedido estaba pagado y aquí ya no lo dice, "
+    "vale lo de aquí. "
+    "Para decir cuánto falta o cómo va el pago, usa sólo la frase de pago que te dio "
+    "order_status en este mismo mensaje, copiada tal cual. Nunca uses montos de mensajes "
+    "anteriores como lo que falta ahora."
 )
 
 
@@ -171,7 +181,7 @@ def _payment_state(phone: str) -> str | None:
     still owed and whether it is fully paid. That order is where a receipt image
     lands (main.handle). Cash that paid it all comes first. No amounts: the numbers
     the customer sees come from tools and instructions."""
-    order = orders.latest_for(phone, [*orders.EDITABLE, *orders.LOCKED])
+    order = _payment_order(phone)
     if order is None or "payment" not in order:
         return None
     pay = order["payment"]
@@ -188,6 +198,14 @@ def _payment_state(phone: str) -> str | None:
         parts = [PAYMENT_STATE.get(pay["method"], pay["method"])]
         if pay["cash_received"] > 0:
             parts.append("el local ya recibió una parte en efectivo")
+    # Discarded cash is named apart from the cash that still counts (C2 Part 2, Gap 6):
+    # left out, an earlier "ya está pagado" in the chat would survive the discard.
+    annulled = sum(1 for c in pay.get("cash", []) if c["status"] == "DISCARDED")
+    if annulled:
+        parts.append(
+            "el local anuló 1 registro de efectivo, que ya no cuenta como pago" if annulled == 1
+            else f"el local anuló {annulled} registros de efectivo, que ya no cuentan como pago"
+        )
     if not found:
         parts.append("no hace falta que transfiera ni que envíe comprobante" if cash_paid_all
                      else "no ha enviado ningún comprobante")
@@ -268,6 +286,463 @@ def system_prompt(phone: str) -> str:
         accounts=CATALOG.accounts_for_prompt() or "  (ninguna configurada)",
     )
     return base + "\n" + _real_state(phone)
+
+
+# ---- the payment sentence (C2 Part 2) ---------------------------------
+#
+# What the customer is told about money is built here from payments.current() and
+# copied by the bot word for word. _finish_turn checks every reply that speaks about
+# payment before it is sent: the sentence must be there, and nothing else in the reply
+# may contradict it.
+
+def _payment_order(phone: str):
+    """The newest live order. ESTADO REAL's payment line, the payment sentence and a
+    receipt image (main.handle) all speak about this one."""
+    return orders.latest_for(phone, [*orders.EDITABLE, *orders.LOCKED])
+
+
+def _accounts_text() -> str:
+    return " o ".join(
+        f"{a['provider']} {a['number']} a nombre de {a['holder']}" for a in CATALOG.accounts()
+    )
+
+
+def payment_sentence(pay: dict, several_live: bool = False) -> str:
+    """What is paid and what is still owed, from current(): every number is current()'s,
+    only formatted here. Each part only when it applies. A transfer nobody confirmed is
+    never called paid, and a red receipt blocks any request for more money."""
+    statuses = [r["status"] for r in pay["receipts"]]
+    confirmed_n, waiting_n, red_n = (
+        statuses.count(s) for s in ("CONFIRMED", "PROOF_RECEIVED", "FLAGGED")
+    )
+    parts = []
+    if pay["cash_received"]:
+        parts.append(f"Ya pagó {fmt(pay['cash_received'])} en efectivo.")
+    if pay["confirmed"]:
+        parts.append(
+            f"El local ya confirmó su transferencia de {fmt(pay['confirmed'])}." if confirmed_n == 1
+            else f"El local ya confirmó sus transferencias por {fmt(pay['confirmed'])}."
+        )
+    if pay["unconfirmed_amount"]:
+        parts.append(
+            f"Su comprobante por {fmt(pay['unconfirmed_amount'])} está pendiente de "
+            "confirmación del local." if waiting_n == 1 else
+            f"Sus comprobantes por {fmt(pay['unconfirmed_amount'])} están pendientes de "
+            "confirmación del local."
+        )
+    if red_n:
+        parts.append(
+            "El local está revisando " + ("un comprobante" if red_n == 1 else "unos comprobantes")
+            + " que nos envió y se comunicará con usted."
+        )
+    if not pay["outstanding"]:
+        parts.append("Su pedido ya está pagado completo.")       # a red receipt never hides it
+    elif not pay["to_pay"]:
+        parts.append("Por ahora no necesita realizar otro pago.")  # a waiting receipt covers it
+    elif pay["under_review"]:
+        pass                                                         # no payment request while red
+    elif pay["method"] == "UNSPECIFIED":
+        parts.append(f"Falta por pagar {fmt(pay['to_pay'])}.")
+    else:
+        due = []
+        if pay["transfer_due"]:
+            due.append(f"{fmt(pay['transfer_due'])} por transferir")
+        if pay["cash_due"]:
+            due.append(f"{fmt(pay['cash_due'])} por pagar en efectivo al recibir")
+        parts.append(f"Quedan {' y '.join(due)}.")
+        if pay["transfer_due"] and CATALOG.accounts():
+            parts.append(
+                f"Puede transferir a {_accounts_text()}. "
+                "Cuando transfiera, envíenos el comprobante."
+            )
+    if pay["confirmed_overpayment"]:
+        parts.append(
+            f"Pagó {fmt(pay['confirmed_overpayment'])} más que el total del pedido; el local "
+            "se comunicará con usted por esa diferencia."
+        )
+    elif pay["overpayment_amount"]:
+        # G32: the surplus counts a receipt nobody confirmed. Never an amount owed back.
+        parts.append(
+            "Con su comprobante pendiente, lo enviado supera el total del pedido; el local "
+            "revisará la diferencia cuando lo confirme." if waiting_n <= 1 else
+            "Con sus comprobantes pendientes, lo enviado supera el total del pedido; el local "
+            "revisará la diferencia cuando los confirme."
+        )
+    text = " ".join(parts)
+    if several_live:
+        text = "En su pedido más reciente: " + text[0].lower() + text[1:]
+    return text
+
+
+def payment_sentence_for(phone: str) -> str | None:
+    """The sentence for the newest live order, None without one."""
+    order = _payment_order(phone)
+    if order is None or "payment" not in order:
+        return None
+    return payment_sentence(order["payment"], len(orders.live_states(phone)) > 1)
+
+
+class _Turn:
+    """What one bot turn did, for _finish_turn. Tools write into it (_run_tool runs
+    inside the turn, under _lock)."""
+
+    def __init__(self, customer: bool = False, with_payment: bool = False):
+        self.customer = customer             # the customer's own text, not a system instruction
+        self.needs_sentence = with_payment   # the reply must carry the payment sentence
+        self.question = False                # the customer asked about payment
+        self.status_question = False         # ...about whether it is paid or what is left
+        self.unverifiable = False            # the payment asked about can't be checked
+        self.failed = False                  # reading the payment failed
+        self.sentences: list[str] = []       # every payment sentence handed out in this turn
+        self.actions: dict[str, str] = {}    # code-built confirmation of what was done
+        self.code_text: list[str] = []       # code-built text of this turn (tool results)
+
+
+_turn = _Turn()
+
+
+def _action(kind: str, text: str) -> None:
+    """What was done in this turn, as a code-built line the safe response keeps."""
+    _turn.actions.pop(kind, None)            # the latest one of a kind wins, at the end
+    _turn.actions[kind] = text
+
+
+def _hand_out_sentence(phone: str, pay: dict, required: bool) -> str:
+    sentence = payment_sentence(pay, len(orders.live_states(phone)) > 1)
+    _turn.sentences.append(sentence)
+    if required:
+        _turn.needs_sentence = True
+    return sentence
+
+
+HANDOFF_ACTION = "Una persona del local va a revisar su solicitud y se comunicará con usted."
+RECEIPT_ACTION = "Recibimos su comprobante; una persona del local lo va a revisar."
+PAYMENT_UNVERIFIED = "No pude verificar el pago de ese pedido."
+PAYMENT_UNAVAILABLE = (
+    "En este momento no pude revisar el estado de su pago. "
+    "Por favor escríbame de nuevo en unos minutos."
+)
+PAYMENT_CORRECTION = (
+    "Tu borrador anterior decía sobre el pago algo que no coincide con el estado real. "
+    "Responde de nuevo y usa, copiada tal cual, sólo esta frase sobre el pago: «{sentence}». "
+    "No escribas otros montos ni digas otra cosa sobre si está pagado o cuánto falta."
+)
+UNVERIFIED_CORRECTION = (
+    "No pudiste verificar el pago de ese pedido. Responde de nuevo: dile sólo que no pudiste "
+    "verificar el pago de ese pedido. No digas si está pagado ni cuánto falta, y no escribas "
+    "montos de pagos."
+)
+UNVERIFIED_TOOL = (
+    "NO SE PUDO verificar el pago de ese pedido: no digas si está pagado ni cuánto falta; "
+    "dile que no pudiste verificarlo. No le menciones ningún código."
+)
+
+# On folded text (lowercase, no accents). A customer message with one of these words
+# is a payment question: the turn starts with a forced order_status (Gap 5).
+PAYMENT_WORDS = re.compile(
+    r"\b(pag\w*|debo|debe|debemos|saldo|comprobantes?|transfer\w*|consign\w*|efectivo|plata|"
+    r"dinero|nequi|daviplata|bancolombia|devuelt\w*|devolu\w*|vueltos?|cobr\w*)\b"
+    r"|\bcuanto\s+(me|le|nos)\s+(falta|faltan|queda|quedan|debo|sale)\b"
+)
+STATUS_QUESTION = re.compile(
+    r"\b(quedo|esta|estaria|queda)\s+(todo\s+)?pag|como\s+va\s+(mi|el)\s+pago|"
+    r"cuanto\s+(me\s+|le\s+)?(falta|faltan|queda|quedan|debo)|\bdebo\b|\bsaldo\b|"
+    r"ya\s+(les\s+)?(llego|pague)|\bquedo\s+todo\b|\besta\s+todo\b"
+)
+# The customer means another order than the newest live one: its payment is not used.
+OTHER_ORDER = re.compile(
+    r"\b(pedido|orden)\s+(anterior|pasado|de\s+ayer|de\s+antes|viejo|primero)\b|\bprimer\s+pedido\b"
+    r"|\botro\s+pedido\b|\b(el|la|lo)\s+(anterior|primero|primera|de\s+ayer|de\s+antes)\b|\bayer\b"
+)
+# Claims a reply can make about the payment, with or without an amount.
+PAID_CLAIM = re.compile(
+    r"\bya\s+(esta|quedo)\s+(pagad\w*|pago\b|cubierto)|\bpagad[oa]\s+complet|\bpago\s+complet"
+    r"|\bno\s+(debe|adeuda)\s+nada|\bno\s+le\s+falta\s+nada|\bpaz\s+y\s+salvo"
+    r"|\btodo\s+(esta|quedo)\s+(pago|pagado)\b|\bya\s+pago\b(?!\s+(una\s+)?parte)(?!\s*\$)(?!\s*\d)"
+)
+NO_MORE_CLAIM = re.compile(
+    r"\bno\s+(necesita|tiene\s+que|hace\s+falta)\s+(realizar\s+|hacer\s+)?(otro|ningun|mas)\s+pago"
+    r"|\bno\s+tiene\s+que\s+pagar\s+(nada\s+)?mas"
+)
+OWES_CLAIM = re.compile(
+    r"\b(falta|faltan|quedan)\b[^.!?\n]{0,40}?\bpor\s+(pagar|transferir)\b|\bdebe\s+(pagar|transferir)\b"
+    r"|\bnos\s+debe\b|\bno\s+ha\s+pagado\b|\bsin\s+pagar\b|\bpendiente\s+de\s+pago\b"
+    r"|\bquedan?\s+debiendo\b"
+)
+BALANCE_WORDS = re.compile(r"\b(falta|faltan|quedan|debe|debo|saldo)\b")
+AMOUNT = re.compile(r"\$\s?(\d{1,3}(?:[.,]\d{3})+|\d+)")
+CLAUSE_END = re.compile(r"[.;,:!?](?=\s|$)|\n|\s+y\s+|\s+e\s+")
+# What a clause says an amount is. The last one before the amount wins.
+MEANINGS = [
+    (re.compile(r"\banul\w*|\bdescart\w*"), "discarded"),
+    (re.compile(r"\bde\s+mas\b|\bmas\s+que\s+el\s+total|\bexcedente|\bsobrante"), "surplus"),
+    (re.compile(r"\b(falta|faltan|quedan|debe|debo|saldo)\b|\bpor\s+pagar\b|\bpor\s+transferir\b"
+                r"|\bpendiente\s+de\s+pago\b"), "owed"),
+    (re.compile(r"\bconfirm\w*"), "confirmed"),
+    (re.compile(r"\b(pago|pagado|pagada|pagaron|abono|recibio|recibimos|recibido|recibida)\b"), "paid"),
+    (re.compile(r"\bcomprobantes?\b|\bpendientes?\b|\benvio\b|\benviado\b|\bmando\b"), "receipt"),
+    (re.compile(r"\b(total|subtotal|pedido|domicilio|valor|vale|cuesta|precio)\b"), "total"),
+]
+TRANSFER_WORDS = re.compile(r"transfer")
+CASH_WORDS = re.compile(r"\befectivo\b|\bal\s+recibir\b|\bal\s+recoger\b")
+
+
+def _norm(text: str) -> str:
+    return " ".join(str(text).split())
+
+
+def _amount_of(match: re.Match) -> int:
+    return int(re.sub(r"[.,]", "", match.group(1)))
+
+
+def _talks_payment(text: str) -> bool:
+    """Does this reply claim anything about whether the order is paid or what is owed?"""
+    folded = _fold(text)
+    return bool(
+        PAID_CLAIM.search(folded) or NO_MORE_CLAIM.search(folded) or OWES_CLAIM.search(folded)
+        or (AMOUNT.search(folded) and BALANCE_WORDS.search(folded))
+    )
+
+
+def _meaning(prefix: str, suffix: str) -> str | None:
+    """What a clause says one amount is: the last meaning word before it, else the
+    first one after it. "Pagó $X más que el total" is a surplus, whatever comes first."""
+    if MEANINGS[1][0].search(suffix):
+        return "surplus"
+    best = None
+    for regex, meaning in MEANINGS:
+        for found in regex.finditer(prefix):
+            if best is None or found.end() > best[0]:
+                best = (found.end(), meaning)
+    if best:
+        return best[1]
+    first = None
+    for regex, meaning in MEANINGS:
+        found = regex.search(suffix)
+        if found and (first is None or found.start() < first[0]):
+            first = (found.start(), meaning)
+    return first[1] if first else None
+
+
+def _code_amounts(phone: str) -> set[int]:
+    """Amounts code wrote in this turn (without the «…» payment sentences, which are
+    checked by meaning), the newest live order's own figures and catalog prices."""
+    found = set(CATALOG.prices())
+    for text in _turn.code_text:
+        found |= {_amount_of(m) for m in AMOUNT.finditer(re.sub(r"«[^»]*»", " ", str(text)))}
+    try:
+        order = _payment_order(phone)
+    except Exception:  # noqa: BLE001 - a failed read only means fewer amounts are allowed
+        order = None
+    if order is not None:
+        found |= {order["total"], order["subtotal"], order["delivery_fee"]}
+        found |= {item["line_total"] for item in order["items"]}
+    return {amount for amount in found if amount}
+
+
+def _wrong_amount(text: str, pay: dict | None, phone: str) -> bool:
+    """True when an amount in the reply does not match what its own clause says it is.
+    An amount found somewhere in the data is not enough: "le faltan $5.000" must be
+    what is owed now, even if $5.000 was once registered and later discarded. A
+    discarded row's amount only explains a discard. `pay` None: nothing is verified,
+    so no amount may describe a payment."""
+    code = _code_amounts(phone)
+    discarded, receipts = set(), set()
+    if pay is not None:
+        discarded = {c["amount"] for c in pay["cash"] if c["status"] == "DISCARDED"}
+        for r in pay["receipts"]:
+            target = discarded if r["status"] == "DISCARDED" else receipts
+            target |= {a for a in (r["amount"], r["confirmed_amount"]) if a}
+    for clause in CLAUSE_END.split(_fold(text)):
+        found = list(AMOUNT.finditer(clause or ""))
+        for i, match in enumerate(found):
+            value = _amount_of(match)
+            prefix = clause[:match.start()]
+            suffix = clause[match.end():found[i + 1].start() if i + 1 < len(found) else len(clause)]
+            meaning = _meaning(prefix, suffix)
+            allowed = set()
+            if MEANINGS[0][0].search(clause):
+                allowed |= discarded                   # explains a discard, nothing more
+            if meaning in (None, "total"):
+                allowed |= code
+            elif pay is None:
+                pass                                   # unverified: no payment amount at all
+            elif meaning == "surplus":
+                allowed.add(pay["confirmed_overpayment"])
+            elif meaning == "owed":
+                # The channel named right after the amount, else right before it.
+                if TRANSFER_WORDS.search(suffix):
+                    allowed.add(pay["transfer_due"])
+                elif CASH_WORDS.search(suffix):
+                    allowed.add(pay["cash_due"])
+                elif TRANSFER_WORDS.search(prefix):
+                    allowed.add(pay["transfer_due"])
+                elif CASH_WORDS.search(prefix):
+                    allowed.add(pay["cash_due"])
+                else:
+                    allowed.add(pay["to_pay"])
+            elif meaning == "paid":
+                if CASH_WORDS.search(suffix + " " + prefix):
+                    allowed.add(pay["cash_received"])
+                elif TRANSFER_WORDS.search(suffix + " " + prefix):
+                    allowed.add(pay["confirmed"])
+                else:
+                    allowed |= {pay["cash_received"], pay["confirmed"], pay["received"], pay["paid"]}
+            elif meaning == "confirmed":
+                allowed.add(pay["confirmed"])
+                allowed |= {r["confirmed_amount"] for r in pay["receipts"]
+                            if r["status"] == "CONFIRMED"}
+            elif meaning == "receipt":
+                allowed |= receipts | {pay["unconfirmed_amount"]}
+                allowed |= code
+            elif meaning == "discarded":
+                pass                                   # only the discarded amounts above
+            if value not in {a for a in allowed if a}:
+                return True
+    return False
+
+
+def _problems(draft: str, sentence: str, pay: dict, phone: str) -> tuple[bool, bool]:
+    """(the sentence is missing, something else in the reply is wrong)."""
+    text, want = _norm(draft), _norm(sentence)
+    missing = want not in text
+    rest = text.replace(want, " ")
+    # An earlier sentence of this turn that a later change made stale.
+    wrong = any(_norm(s) != want and _norm(s) in rest for s in _turn.sentences)
+    folded = _fold(rest)
+    if PAID_CLAIM.search(folded) and pay["outstanding"] > 0:
+        wrong = True
+    if NO_MORE_CLAIM.search(folded) and pay["to_pay"] > 0 and pay["outstanding"] > 0:
+        wrong = True
+    if OWES_CLAIM.search(folded) and (
+            not pay["outstanding"] or not pay["to_pay"] or pay["under_review"]):
+        wrong = True
+    if _wrong_amount(rest, pay, phone):
+        wrong = True
+    return missing, wrong
+
+
+def _unverified_wrong(draft: str, phone: str) -> bool:
+    folded = _fold(draft)
+    return bool(
+        PAID_CLAIM.search(folded) or NO_MORE_CLAIM.search(folded) or OWES_CLAIM.search(folded)
+        or _wrong_amount(draft, None, phone)
+    )
+
+
+def _live_payment(phone: str) -> tuple[dict | None, bool]:
+    """(the newest live order's current() or None, whether reading it failed)."""
+    try:
+        order = _payment_order(phone)
+    except Exception:  # noqa: BLE001 - the caller never falls back to an old amount
+        traceback.print_exc()
+        return None, True
+    return (order.get("payment") if order is not None else None), False
+
+
+def _send(history: list, text: str) -> str:
+    """The history says exactly what the customer gets."""
+    history[-1] = {"role": "assistant", "content": [{"type": "text", "text": text}]}
+    return text
+
+
+def _safe(line: str) -> str:
+    """Built by code: what was done in this turn, then one payment line."""
+    return "\n\n".join([*_turn.actions.values(), line])
+
+
+def _answer_again(phone: str, history: list, extra: str | None = None,
+                  forced_status: bool = False) -> str:
+    """The draft is never sent: it leaves the history and the model answers once more,
+    with `extra` added to the system prompt. forced_status: a fresh order_status first."""
+    if history and history[-1].get("role") == "assistant":
+        history.pop()
+    system = system_prompt(phone) + (f"\n\n{extra}" if extra else "")
+    if forced_status:
+        response = client().messages.create(
+            model=model(), max_tokens=1024, system=system, tools=TOOLS, messages=history,
+            tool_choice={"type": "tool", "name": "order_status"},
+        )
+        history.append({"role": "assistant", "content": response.content})
+        results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                output = _run_tool(phone, block.name, block.input or {})
+                _log_tool(phone, block.name, block.input or {}, output)
+                _turn.code_text.append(output)
+                results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
+        history.append({"role": "user", "content": results})
+    response = client().messages.create(
+        model=model(), max_tokens=1024, system=system, tools=TOOLS, messages=history,
+        tool_choice={"type": "none"},
+    )
+    history.append({"role": "assistant", "content": response.content})
+    return "\n\n".join(
+        b.text.strip() for b in response.content if b.type == "text" and b.text.strip()
+    ).strip()
+
+
+def _finish_turn(phone: str, history: list, draft: str) -> str:
+    """The last step of every turn: a reply that speaks about payment is checked
+    against the payment as it is now, before anything is sent (C2 Part 2, Gaps 3-5).
+
+    1. Backstop: a customer reply that claims something about the payment with no
+       payment sentence read in this turn is replaced by a fresh answer.
+    2. The payment can't be checked: no claim and no payment amount may go out.
+    3. Otherwise the current sentence must be in the reply and nothing else may
+       contradict it. A missing sentence alone is appended; anything else gets one more
+       answer from the model, and then a safe reply built by code."""
+    t = _turn
+    talks = _talks_payment(draft)
+    if t.customer and talks and not t.sentences and not t.unverifiable and not t.failed:
+        pay, failed = _live_payment(phone)
+        if failed:
+            t.failed = True
+        elif pay is not None:
+            draft = _answer_again(phone, history, forced_status=True) or "Perdón, ¿me lo repite?"
+            _send(history, draft)
+        else:
+            t.unverifiable = True
+        talks = _talks_payment(draft)
+    if not (t.needs_sentence or t.question or t.unverifiable or t.failed
+            or (t.customer and talks)):
+        return draft
+
+    pay = None
+    if not t.unverifiable:
+        pay, failed = _live_payment(phone)       # read once more: the state the turn ends in
+        if failed:
+            # Never an old amount or a status nobody checked instead.
+            if not draft or _unverified_wrong(draft, phone):
+                return _send(history, _safe(PAYMENT_UNAVAILABLE))
+            if (t.question or t.needs_sentence) and PAYMENT_UNAVAILABLE not in draft:
+                return _send(history, f"{draft}\n\n{PAYMENT_UNAVAILABLE}")
+            return draft
+        if pay is None:
+            t.unverifiable = True               # no live order left (e.g. cancelled now)
+
+    if t.unverifiable:
+        if _unverified_wrong(draft, phone):
+            draft = _answer_again(phone, history, UNVERIFIED_CORRECTION)
+            if not draft or _unverified_wrong(draft, phone):
+                return _send(history, _safe(PAYMENT_UNVERIFIED))
+        folded = _fold(draft)
+        if t.status_question and "no pude verificar" not in folded \
+                and "no puedo verificar" not in folded:
+            return _send(history, f"{draft}\n\n{PAYMENT_UNVERIFIED}".strip())
+        return _send(history, draft)
+
+    sentence = payment_sentence(pay, len(orders.live_states(phone)) > 1)
+    missing, wrong = _problems(draft, sentence, pay, phone)
+    if not missing and not wrong:
+        return draft
+    if not wrong:
+        return _send(history, f"{draft}\n\n{sentence}".strip())        # Gap 3
+    draft = _answer_again(phone, history, PAYMENT_CORRECTION.format(sentence=sentence))
+    missing, wrong = _problems(draft, sentence, pay, phone)
+    if draft and not wrong:
+        return _send(history, f"{draft}\n\n{sentence}" if missing else draft)
+    return _send(history, _safe(sentence))
 
 
 # request_handoff topics. Every topic except OTHER is covered by a tool, so only
@@ -400,7 +875,11 @@ TOOLS = [
     },
     {
         "name": "order_status",
-        "description": "Consulta en qué va el último pedido del cliente.",
+        "description": (
+            "Consulta en qué va el último pedido del cliente y cómo va su pago. Úsala cada vez "
+            "que el cliente pregunte por su pago o por cuánto le falta: devuelve la frase de "
+            "pago que debes copiar tal cual."
+        ),
         "input_schema": {"type": "object", "properties": {}},
     },
     {
@@ -464,6 +943,7 @@ def _order_text(order: dict) -> str:
 
 def _handoff(order: dict, summary: str, why: str) -> str:
     handoff.request(order["phone"], order["id"], summary)
+    _action("handoff", HANDOFF_ACTION)
     return (
         f"PASADO A UNA PERSONA: {why}, así que el sistema no hizo el cambio. El local ya "
         "quedó avisado. Dile al cliente con amabilidad que una persona del local va a "
@@ -472,61 +952,31 @@ def _handoff(order: dict, summary: str, why: str) -> str:
     )
 
 
-def _payment_line(change: dict, transfer_due: int | None = None) -> str:
-    """What the edit result says about money. `transfer_due` is the value from
-    `payments.current()` after the edit; None means unknown."""
-    if change.get("under_review"):
-        return (
-            " El local está revisando el comprobante que envió y se comunica con él. "
-            "NO le pidas que pague otra vez."
-        )
-    if change.get("surplus"):
-        cash, sent = change.get("cash", 0), change.get("sent", 0)
-        if cash and sent:
-            paid_in = f"Entre transferencias y efectivo ya pagó {fmt(sent + cash)}"
-        elif cash:
-            paid_in = f"Ya pagó {fmt(cash)} en efectivo"
-        else:
-            paid_in = f"Ya envió {fmt(sent)}"
-        return (
-            f" {paid_in}, {fmt(change['surplus'])} más que el nuevo total. No le prometas "
-            "devolución: dile que el local revisa la diferencia y se comunica con él."
-        )
-    if change.get("cash") and change.get("cash_due") and not change.get("sent"):
-        line = (f" Ya pagó {fmt(change['cash'])} en efectivo; quedan "
-                f"{fmt(change['cash_due'])} en efectivo al recibir.")
-        if transfer_due == 0:                     # C2 R7: a bare fact was left out of the reply
-            return line + (" Dile al cliente esas dos cifras: lo que ya pagó en efectivo y lo "
-                           "que le queda por pagar en efectivo al recibir. No le pidas "
-                           "transferencia ni comprobante, y no le preguntes cómo va a pagar.")
-        # A transfer is still owed (e.g. MIXED) or unknown: today's text (DECISION F1 = A, gap G29).
-        return line
-    if change.get("missing"):
-        return (
-            f" Ya envió {fmt(change['sent'])}. Faltan {fmt(change['missing'])}: pídele el "
-            f"comprobante de esa diferencia.\nCuentas del restaurante:\n{CATALOG.accounts_for_prompt()}"
-        )
-    if change.get("cash_due"):
-        return (
-            f" Ya envió {fmt(change['sent'])} por transferencia; quedan "
-            f"{fmt(change['cash_due'])} en efectivo al recibir."
-        )
-    if change.get("ask_method"):
-        return " Como cambió el total, pregúntale otra vez cómo va a pagar."
-    return ""
-
-
-def _amended_text(order: dict, change: dict) -> str:
+def _amended_text(phone: str, order: dict, change: dict) -> str:
+    """The edit result. What the customer is told about money is the payment sentence,
+    built by code from current() after the edit, copied as it is (C2 Part 2)."""
     state_line = (
         "El local ya ve el cambio; no hace falta que el cliente vuelva a confirmar."
         if order["state"] == "CONFIRMED"
         else "Pregúntale al cliente si lo confirma."
     )
+    pay = order.get("payment") or payments.current(order["id"])
+    sentence = _hand_out_sentence(phone, pay, required=True)
+    tail = ""
+    if change.get("ask_method"):
+        tail += " Como cambió el total, pregúntale otra vez cómo va a pagar."
+    if pay["under_review"]:
+        tail += " No le pidas que pague otra vez."
+    if pay["overpayment_amount"]:
+        tail += " No le prometas devolución."
+    _action("order", "Listo, su pedido quedó actualizado:\n" + _order_text(order) + (
+        "\n¿Me confirma el pedido así?" if order["state"] == "PENDING_CONFIRMATION" else ""
+    ))
     return (
         "Pedido actualizado. Es el MISMO pedido, no uno nuevo:\n"
         + _order_text(order) + "\n" + state_line
-        + _payment_line(change, (order.get("payment") or {}).get("transfer_due"))
-        + " No le menciones ningún código."
+        + f" Copia tal cual, sin cambiar nada, esta frase sobre su pago: «{sentence}»"
+        + tail + " No le menciones ningún código."
     )
 
 
@@ -547,8 +997,10 @@ def _edit(phone: str, attempt: str, mutate=None, **delivery) -> str:
                     "cancel_order. No lo pases a una persona: el local todavía no lo ha aceptado. "
                     "Si quiere cambiar un producto por otro, agrega primero el nuevo y después "
                     "quita el anterior.")
-        return _amended_text(order, change)
-    return "Pedido actualizado:\n" + cart.render(mutate())
+        return _amended_text(phone, order, change)
+    rendered = cart.render(mutate())
+    _action("order", "Listo, actualicé su pedido:\n" + rendered)
+    return "Pedido actualizado:\n" + rendered
 
 
 def _run_tool(phone: str, name: str, args: dict) -> str:
@@ -601,6 +1053,7 @@ def _run_tool(phone: str, name: str, args: dict) -> str:
                     "Sigue normal con add_item."
                 )
             cart.open_cart(phone, related_order_id=locked["id"])
+            _action("separate", "Listo, abrí un pedido aparte.")
             extra = ""
             if locked["fulfilment_type"] == "DELIVERY":
                 fee, _ = CATALOG.delivery_fee_for(locked.get("zone"))
@@ -634,6 +1087,9 @@ def _run_tool(phone: str, name: str, args: dict) -> str:
                 "\n(Este es un pedido APARTE del que el local ya aceptó.)"
                 if order["related_order_id"] else ""
             )
+            _action("order", "Este es su pedido:\n" + _order_text(order) + (
+                "\nEs un pedido aparte del que el local ya aceptó." if order["related_order_id"]
+                else "") + "\n¿Me lo confirma?")
             return (
                 f"Pedido creado, esperando confirmación.{aparte}\n"
                 f"{_order_text(order)}\n"
@@ -645,6 +1101,7 @@ def _run_tool(phone: str, name: str, args: dict) -> str:
             if not order:
                 return "No hay ningún pedido esperando confirmación. Usa create_order primero."
             order = orders.apply_event(order["id"], "customer_confirms")
+            _action("confirm", "Su pedido quedó confirmado.")
             return (
                 "Pedido confirmado. El local todavía no lo ha aceptado; hasta que lo acepte, "
                 "cualquier cambio se hace sobre este mismo pedido con las herramientas de "
@@ -673,6 +1130,7 @@ def _run_tool(phone: str, name: str, args: dict) -> str:
             )
             orders.apply_event(order["id"], event, args.get("reason"))
             orders.reopen_cart_after_edit(phone)
+            _action("cancel", "Su pedido quedó cancelado.")
             return "Pedido cancelado. No le menciones ningún código."
 
         if name == "choose_payment":
@@ -715,24 +1173,48 @@ def _run_tool(phone: str, name: str, args: dict) -> str:
             )
             if previous_method != "UNSPECIFIED" and not same:
                 orders.mark_edited(order["id"])
-            if record["method"] == "CASH":
-                return f"Pago en efectivo registrado: {fmt(record['cash_amount'])} al recibir."
-            accounts = CATALOG.accounts_for_prompt()
+            _action("payment", "Listo, quedó registrada su forma de pago.")
+            # The amounts, the accounts and the request for a receipt all come from the
+            # payment sentence: a receipt is asked for only when a transfer is due.
+            sentence = _hand_out_sentence(phone, record, required=True)
             return (
-                f"Registrado. Debe transferir {fmt(record['transfer_amount'])}"
-                + (f" y pagar {fmt(record['cash_amount'])} en efectivo" if record["cash_amount"] else "")
-                + f".\nCuentas del restaurante:\n{accounts}\n"
-                "Pídele que envíe la foto del comprobante."
+                f"Forma de pago registrada: {label}. Copia tal cual, sin cambiar nada, esta "
+                f"frase sobre su pago: «{sentence}» No le menciones ningún código."
             )
 
         if name == "order_status":
-            order = orders.latest_for(phone)
+            if _turn.unverifiable:
+                return (
+                    "El cliente pregunta por el pago de un pedido que no se puede verificar "
+                    "desde aquí. " + UNVERIFIED_TOOL
+                )
+            unavailable = (
+                "NO SE PUDO consultar el pago en este momento: no digas cuánto falta ni si "
+                "ya está pagado. No le menciones ningún código."
+            )
+            try:
+                live = _payment_order(phone)
+                order = live or orders.latest_for(phone)
+            except Exception:  # noqa: BLE001 - never an old amount instead
+                traceback.print_exc()
+                _turn.failed = True
+                return unavailable
             if not order:
                 return "El cliente no tiene pedidos."
             label = STATE_LABELS.get(order["state"], order["state"])
+            head = f"Su pedido está {label}. Total {fmt(order['total'])}."
+            if live is None:
+                _turn.unverifiable = True       # a delivered or cancelled order: not checked here
+                return f"{head} {UNVERIFIED_TOOL}"
+            try:
+                sentence = _hand_out_sentence(phone, live["payment"], required=False)
+            except Exception:  # noqa: BLE001 - never an old amount instead
+                traceback.print_exc()
+                _turn.failed = True
+                return f"{head} {unavailable}"
             return (
-                f"Su pedido está {label}. Total {fmt(order['total'])}. "
-                "No le menciones ningún código."
+                f"{head} Frase de pago, cópiala tal cual, sin cambiar nada, cuando hables del "
+                f"pago: «{sentence}» No le menciones ningún código."
             )
 
         if name == "request_handoff":
@@ -768,6 +1250,7 @@ def _run_tool(phone: str, name: str, args: dict) -> str:
                     "vez a request_handoff con topic OTHER y summary."
                 )
             handoff.request(phone, order["id"], summary)
+            _action("handoff", HANDOFF_ACTION)
             return (
                 "PASADO A UNA PERSONA: el local ya quedó avisado. Esto no era un cambio del "
                 "pedido y no se cambió nada: no le menciones ningún cambio. Dile que una "
@@ -802,8 +1285,16 @@ def _run_tool(phone: str, name: str, args: dict) -> str:
 
 # ---- the conversation loop ------------------------------------------
 
-def reply(phone: str, user_content) -> str:
-    """user_content is a string, or a content-block list (for images)."""
+def reply(phone: str, user_content, *, customer: bool = False, with_payment: bool = False,
+          action: str | None = None) -> str:
+    """user_content is a string, or a content-block list (for images).
+
+    customer: it is the customer's own text (main.handle); a payment question starts
+    with a forced order_status, and a reply that speaks about payment is checked.
+    with_payment: a system instruction that carries the payment sentence (a clean
+    receipt); the reply must carry it too. action: what that instruction reports as
+    done, kept by the safe reply (_finish_turn)."""
+    global _turn
     with _lock:
         history = _history.setdefault(phone, [])
         # If the call below fails, the history must go back exactly as it was.
@@ -811,11 +1302,22 @@ def reply(phone: str, user_content) -> str:
         # request then fails with "roles must alternate" — one bad key turns
         # into a conversation that never recovers.
         checkpoint = list(history)
+        _turn = _Turn(customer=customer, with_payment=with_payment)
+        if action:
+            _action("instruction", action)
+        if not customer and isinstance(user_content, str):
+            _turn.code_text.append(user_content)
         try:
+            if with_payment:
+                sentence = payment_sentence_for(phone)
+                if sentence:
+                    _turn.sentences.append(sentence)
             return _reply_locked(phone, history, user_content)
         except Exception:
             history[:] = checkpoint
             raise
+        finally:
+            _turn = _Turn()
 
 
 def _trim(history: list) -> None:
@@ -858,18 +1360,42 @@ def _log_tool(phone: str, name: str, args: dict, output: str) -> None:
 MAX_TOOL_ROUNDS = 8
 
 
+def _payment_question(phone: str, text: str) -> dict | None:
+    """Marks the turn when the customer asks about payment, and returns the tool_choice
+    for the first model call: a fresh order_status, never an amount from older chat
+    (Gap 5). A question about another order than the newest live one, or with no live
+    order at all, can't be checked: the turn is unverifiable."""
+    folded = _fold(text)
+    if not PAYMENT_WORDS.search(folded):
+        return None
+    _turn.question = True
+    _turn.status_question = bool(STATUS_QUESTION.search(folded))
+    live, failed = _live_payment(phone)
+    any_order = orders.latest_for(phone) is not None
+    if not failed and (OTHER_ORDER.search(folded) or (live is None and any_order)):
+        _turn.unverifiable = True
+    if failed or live is not None or any_order:
+        return {"type": "tool", "name": "order_status"}
+    return None
+
+
 def _reply_locked(phone: str, history: list, user_content) -> str:
     history.append({"role": "user", "content": user_content})
     _trim(history)
+    force = None
+    if _turn.customer and isinstance(user_content, str):
+        force = _payment_question(phone, user_content)
 
     text_out = []
-    for _ in range(MAX_TOOL_ROUNDS):  # tool-use rounds
+    for round_number in range(MAX_TOOL_ROUNDS):  # tool-use rounds
+        extra = {"tool_choice": force} if force and round_number == 0 else {}
         response = client().messages.create(
             model=model(),
             max_tokens=1024,
             system=system_prompt(phone),
             tools=TOOLS,
             messages=history,
+            **extra,
         )
         history.append({"role": "assistant", "content": response.content})
 
@@ -887,6 +1413,7 @@ def _reply_locked(phone: str, history: list, user_content) -> str:
             if block.type == "tool_use":
                 output = _run_tool(phone, block.name, block.input or {})
                 _log_tool(phone, block.name, block.input or {}, output)
+                _turn.code_text.append(output)
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -910,8 +1437,10 @@ def _reply_locked(phone: str, history: list, user_content) -> str:
         history.append({"role": "assistant", "content": response.content})
         text_out = [b.text.strip() for b in response.content if b.type == "text" and b.text.strip()]
 
+    text = "\n\n".join(text_out).strip() or "Perdón, ¿me lo repite?"
+    text = _finish_turn(phone, history, text)
     _trim(history)
-    return "\n\n".join(text_out).strip() or "Perdón, ¿me lo repite?"
+    return text
 
 
 def correct_last_reply(phone: str, text: str) -> None:

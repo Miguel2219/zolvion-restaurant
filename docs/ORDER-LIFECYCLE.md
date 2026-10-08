@@ -44,9 +44,9 @@ again. Anything not in `orders.TRANSITIONS` raises `IllegalTransition` (HTTP 409
 | En camino | OUT_FOR_DELIVERY | Entregado |
 
 PENDING_CONFIRMATION orders have no column. Per card: "Actualizado HH:MM" when a Nuevos
-order changed after confirmation; "pedido aparte" for a separate order; the receipts
-block with Confirmar / Descartar per receipt and 👁 (`payments.md`); "Registrar efectivo
-recibido" while money is outstanding; the amber handoff box; a red pulse once a Nuevos
+order changed after confirmation; "pedido aparte" for a separate order; the "Pagos"
+block (receipts with Confirmar, ✕ and 👁; cash rows with ✕; `payments.md` §2); "Registrar
+efectivo recibido" while money is outstanding; the amber handoff box; a red pulse once a Nuevos
 order is older than 600 s from creation (`?alert=N` changes it).
 
 ## 3. Changing an order: the windows
@@ -113,6 +113,7 @@ Details:
 | CANCELLED by the customer | Nothing; they already know |
 | Receipt confirmed by staff | Code-built message (`payments.md` §4) |
 | Receipt discarded by staff | One AI message from the reason, guarded; fixed template on failure |
+| Cash registered, or a cash row discarded | Nothing; ESTADO REAL and the payment sentence carry it when the customer asks |
 
 No customer message may contain the order code (`P-1234`) or the word "cocina"; tests
 check every fixed notification. The bot's state answers come from ESTADO REAL

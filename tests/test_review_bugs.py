@@ -358,17 +358,19 @@ def test_r7_edit_after_cash_without_cash_in_config(monkeypatch):
     assert payment["total"] == ESPECIAL + GASEOSA
     assert payment["method"] == "CASH"
     assert payment["cash_amount"] == ESPECIAL + GASEOSA
-    assert (
-        f" Ya pagó {fmt(ESPECIAL)} en efectivo; quedan {fmt(GASEOSA)} en efectivo al recibir."
-        in result
-    )
     assert payment["transfer_due"] == 0
-    assert "Dile al cliente esas dos cifras" in result
-    assert "No le pidas transferencia ni comprobante" in result
+    # The code-built sentence (C2 Part 2): both figures, no transfer, no receipt.
+    assert (
+        f"«Ya pagó {fmt(ESPECIAL)} en efectivo. Quedan {fmt(GASEOSA)} por pagar en efectivo "
+        "al recibir.»" in result
+    )
+    assert "comprobante" not in result.split("«", 1)[1]
     assert "el local ya recibió una parte en efectivo" in _payment_line(brain.system_prompt(PHONE))
 
 
-def test_r7_cash_line_never_forbids_a_transfer_still_owed():
+def test_r7_g29_edit_names_the_transfer_still_owed():
+    """G29 (C2 Part 2): after an edit on a mixed order with cash registered, the sentence
+    names the cash paid, the transfer still owed and the cash still owed."""
     order = _confirmed_order()
     payments.set_method(order["id"], "MIXED", transfer_amount=10000)
     payments.register_cash(order["id"], 5000)
@@ -377,9 +379,13 @@ def test_r7_cash_line_never_forbids_a_transfer_still_owed():
     due = ESPECIAL + GASEOSA - 15000
     assert (pay["total"], pay["cash_received"], pay["transfer_due"], pay["cash_due"]) == (
         ESPECIAL + GASEOSA, 5000, 10000, due)
-    assert f" Ya pagó {fmt(5000)} en efectivo; quedan {fmt(due)} en efectivo al recibir." in result
-    assert "No le pidas transferencia ni comprobante" not in result
-    assert "Dile al cliente esas" not in result               # DECISION F1 = A: today's text (G29)
+    account = CATALOG.accounts()[0]
+    assert (
+        f"«Ya pagó {fmt(5000)} en efectivo. Quedan {fmt(10000)} por transferir y {fmt(due)} "
+        f"por pagar en efectivo al recibir. Puede transferir a {account['provider']} "
+        f"{account['number']} a nombre de {account['holder']}. Cuando transfiera, envíenos "
+        "el comprobante.»" in result
+    )
 
 
 # ---- R8: an order is created whole or not at all ------------------------------
@@ -472,7 +478,7 @@ def test_r9_tool_descriptions_never_say_cocina():
 
 def test_r10_stop_instruction_says_who_did_what(monkeypatch):
     told = []
-    monkeypatch.setattr(brain, "reply", lambda phone, message: told.append(message) or "ok")
+    monkeypatch.setattr(brain, "reply", lambda phone, message, **kw: told.append(message) or "ok")
 
     rejected = _confirmed_order()
     rejected = orders.apply_event(rejected["id"], "staff_rejects", "se acabó el pan")

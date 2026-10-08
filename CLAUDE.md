@@ -30,7 +30,7 @@ No linter or formatter is configured.
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
-python -m pytest tests -q                                   # 263 pass, 1 xfail (G16)
+python -m pytest tests -q                                   # 306 pass, 1 xfail (G16)
 python -m pytest tests -q -k wrong_amount                   # by name
 python -m pytest tests/test_flow.py::test_happy_path_pickup # one test
 ```
@@ -69,11 +69,11 @@ POST /sim/message (browser)        ─┘         │
 | `db.py` | schema (WAL), thread-local connection, `run()/q()/q1()`, `transaction()`, migrations in `init()`; `DB_PATH` fixed at import |
 | `cart.py` | cart mutations; identical lines merge; `LineChoiceNeeded`; `summary()` is the only producer of a total |
 | `orders.py` | `TRANSITIONS`, modification windows, `amend()`, `board()`, `live_states()` |
-| `payments.py` | `set_method`, `check_proof`, `confirm_receipt`/`discard_receipt` (human only), `register_cash`, `follow_total`, `current()` (the only money math) |
+| `payments.py` | `set_method`, `check_proof`, `confirm_receipt`/`discard_receipt`/`register_cash`/`discard_cash` (human only), `follow_total`, `current()` (the only money math) |
 | `handoff.py` | `request`/`resolve`/`open_for`: the amber "Necesita a una persona" box |
 | `wa.py` | WhatsApp Cloud API, FAKE mode, signature check, `parse_webhook` |
-| `brain.py` | `SYSTEM`, `TOOLS`, `_run_tool`, per-phone history, ESTADO REAL block, `extract_proof` |
-| `reports.py` | SQL aggregates; "today" = calendar day in `America/Bogota` |
+| `brain.py` | `SYSTEM`, `TOOLS`, `_run_tool`, per-phone history, ESTADO REAL block, payment sentence and `_finish_turn`, `extract_proof` |
+| `reports.py` | SQL aggregates, payments via `current()`; "today" = calendar day in `America/Bogota` |
 | `main.py` | routes, `handle()`, `notify()`, `_stop_message`, `_discard_message`; `db.init()` at import |
 
 `static/` pages poll the JSON API (kitchen 2 s, simulator 1.5 s, reports 4 s). Kitchen
@@ -94,7 +94,7 @@ buttons send event names from `orders.TRANSITIONS`. Routes and tables: `docs/ARC
    `payment_receipts.reference` has a unique partial index (a discarded receipt keeps its
    reference). Code tells a resend from a reuse only after the `IntegrityError`.
    `db.run()` rolls back on failure; `db.transaction()` groups writes that land together
-   (`orders.amend`, `_store_receipt`, `register_cash`, `confirm_receipt`). Never call
+   (`orders.amend`, `_store_receipt`, `register_cash`, `discard_cash`, `confirm_receipt`). Never call
    `check_proof` inside a transaction: it catches the `IntegrityError`.
 5. **Vocabulary:** "aceptado por el local" is the only phrase for `ACCEPTED` and later. A
    `CONFIRMED` order is confirmed by the customer, never "recibido" or "enviado al local".
@@ -130,32 +130,26 @@ from the staff's reason (`_stop_message`, template fallback). `COMPLETED` and cu
 ## Payments (`docs/payments.md`)
 
 - `payments` row per order: method (`UNSPECIFIED`, `CASH`, `TRANSFER`, `MIXED`), agreed split
-  (`transfer_amount`, `cash_amount`) and `cash_received`. A `MIXED` split is validated by code.
-  Its old receipt columns are legacy: `db.init()` copied them once into `payment_receipts`;
-  new code never writes `payments.status`, which keeps that migration idempotent.
-- **One `payment_receipts` row per image**, photo in `receipt_photos` (served by
-  `GET /api/receipts/{id}/photo`). Status: `PROOF_RECEIVED`, `FLAGGED`, `CONFIRMED`,
-  `DISCARDED`; the last two are final. Order-level status is derived: worst receipt wins
-  (`FLAGGED` > `PROOF_RECEIVED` > `CONFIRMED`), discarded ignored, none left = `PENDING`.
-- Expected amount (`_expected_for_new_receipt`): a first receipt (or when earlier ones are all
-  red/discarded) uses `_expectation(current())`: registered cash comes off first (all paid →
-  red "No se esperaba otro pago."), then the agreed transfer capped at what is left, else what
-  is left with the method **inferred** from a clean receipt. Later receipts: `transfer_due`,
-  then `cash_due` on MIXED, else that red. Other checks: date window (`proof_clock_skew_minutes`,
-  grey note past `proof_notice_minutes`), destination (`Catalog.owns_account`; holder name only
-  when no number is shown), grey note when another receipt is red.
-- Repeated reference: same order and same readable amount = resend (no row, `resent=True`);
-  anything else is a red row "Este comprobante ya fue usado antes (referencia X)", stored
-  without the reference but with its photo.
-- Human only: `confirm_receipt(amount)` refuses 0 and sets the method only on
-  `UNSPECIFIED`/`CASH`; `discard_receipt(reason)` needs a reason and the customer gets one
-  `_discard_message` (template if the model fails or writes "confirmad", "cocina", "$" or the
-  code; `brain.correct_last_reply` fixes the history). `register_cash` never exceeds
-  `outstanding` (400 «El monto es mayor de lo que falta…») and settles `UNSPECIFIED` as `CASH`.
-- `current()` returns `sent`, `transfer_due` (registered cash comes off it), `cash_due`, `paid`
-  (confirmed + cash, capped), `outstanding`, `overpayment_amount` (`sent + cash_received -
-  total`), `confirmed_overpayment` (the same, confirmed receipts only: what the confirm message
-  says), `unconfirmed_amount`, `status`, `under_review`. Overpayment never blocks anything.
+  (`transfer_amount`, `cash_amount`; `MIXED` validated by code), `method_from_cash`. Its
+  `cash_received` and old receipt columns are legacy: never written (`db.init()` copied the
+  receipt ones once into `payment_receipts`, which keeps that migration idempotent).
+- **One `payment_receipts` row per image** (photo in `receipt_photos`): `PROOF_RECEIVED`,
+  `FLAGGED`, `CONFIRMED`, `DISCARDED` (last two final); order status = worst receipt,
+  discarded ignored, none = `PENDING`. **One `cash_payments` row per cash registration**
+  (`RECEIVED`/`DISCARDED`). The card's "Pagos" block lists both, oldest first; a discarded row
+  leaves the card and counts nowhere (ESTADO REAL still names it).
+- Expected amount and checks (`_expected_for_new_receipt`, `_expectation`): `docs/payments.md`
+  §3. Registered cash comes off first; all paid → red "No se esperaba otro pago."
+- Repeated reference: same order and amount = resend (no row; a discarded one returns
+  `resent_discard_reason` and the bot gives the reason again); anything else is a red row
+  "Este comprobante ya fue usado antes (referencia X)", stored without the reference.
+- Human only: `confirm_receipt` (refuses 0; sets the method only on `UNSPECIFIED`/`CASH`);
+  `discard_receipt(reason)` (one guarded `_discard_message`); `register_cash` (≤ `outstanding`;
+  `UNSPECIFIED` → `CASH` with `method_from_cash`); `discard_cash(reason)` (nobody is told; the
+  last cash row takes back a method only cash set). Any other method write clears the flag.
+- `current()`: `cash` rows, `cash_received`, `sent`, `transfer_due`, `cash_due`, `to_pay` (their
+  sum), `paid` (capped), `outstanding`, `confirmed`, `received` (uncapped, Reportes),
+  `overpayment_amount`, `confirmed_overpayment`, `unconfirmed_amount`, `status`, `under_review`.
 - `choose_payment` goes to a person once a receipt arrived, cash was registered or the order is
   out for delivery; repeating the current method answers "no cambió nada".
 
@@ -172,6 +166,13 @@ from the staff's reason (`_stop_message`, template fallback). `COMPLETED` and cu
 - `system_prompt(phone)` appends `ESTADO REAL AHORA` on every model call: the live orders'
   states plus one "Pago del pedido más reciente" line (`_payment_state`, no amounts) and
   `PAYMENT_RULES`. It wins over the chat history. No codes or totals in it.
+- **Payment sentence** (`payment_sentence`, from `current()`): edits, `choose_payment`,
+  `order_status` and the clean-receipt instruction hand it out to be copied verbatim. Payment
+  words in the customer's text force `order_status` first. `_finish_turn` checks every reply
+  that speaks about payment: a missing sentence is appended; a contradiction, a stale sentence
+  or an amount that doesn't match its clause's meaning gets one more answer, then a code-built
+  reply (`_Turn.actions` + sentence). Delivered/cancelled or "el pedido anterior" →
+  «No pude verificar el pago de ese pedido.» Details: `docs/payments.md` §7.
 - Each tool call prints `[bot ...1234] <tool> <args> -> <result>` (cut at 160 chars), the
   only record of what the model called.
 - `ANTHROPIC_MODEL` empty → first id from `models.list()` matching sonnet, opus, haiku.
@@ -181,7 +182,8 @@ from the staff's reason (`_stop_message`, template fallback). `COMPLETED` and cu
 Add the schema to `TOOLS` and a branch in `_run_tool`. Handlers return Spanish text for the
 model, often a bracketed instruction (`(… No le menciones ningún código.)`), and report
 failures as `NO SE PUDO: …` instead of raising. Anything that changes what was ordered goes
-through `_edit` first.
+through `_edit` first. A completed action records its code-built confirmation with `_action`;
+a change to the payment hands out the sentence with `_hand_out_sentence`.
 
 ## Tests (`tests/test_flow.py`; code-review defects R1–R12 in `tests/test_review_bugs.py`)
 

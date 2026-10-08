@@ -193,7 +193,7 @@ def amend(
         db.run("UPDATE carts SET state='CONVERTED', updated_at=? WHERE id=?", (db.now(), staging))
         # Verified: the "accepted meanwhile" race cannot happen today. Every write
         # route (inbound, sim_message, order_event, confirm_receipt, discard_receipt,
-        # register_cash) is an async def with no await around the database work, so
+        # register_cash, discard_cash) is an async def with no await around the database work, so
         # bot turns and staff buttons run one at a time on the event-loop thread. The
         # guarded UPDATE ... WHERE state IN (...) stays as a defense in case that
         # changes, and the transaction makes its outcome clean either way.

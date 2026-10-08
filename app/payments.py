@@ -61,10 +61,13 @@ def _apply_split(order_id: int, method: str, transfer_amount=None, cash_amount=N
     else:
         raise PaymentError(f"Método de pago desconocido: {method}.")
 
+    # method_from_cash survives only a re-split of the same method (follow_total on a
+    # CASH that cash set); any other method write means cash no longer explains it.
+    # SQLite reads `method` in the CASE before this UPDATE changes it.
     db.run(
-        "UPDATE payments SET method=?, transfer_amount=?, cash_amount=?, updated_at=?"
-        " WHERE order_id=?",
-        (method, transfer, cash, db.now(), order_id),
+        "UPDATE payments SET method_from_cash = CASE WHEN method=? THEN method_from_cash ELSE 0 END,"
+        " method=?, transfer_amount=?, cash_amount=?, updated_at=? WHERE order_id=?",
+        (method, method, transfer, cash, db.now(), order_id),
     )
     return current(order_id)
 
@@ -268,8 +271,8 @@ def _store_receipt(
         if inferred is not None:
             method, transfer, cash = inferred
             db.run(
-                "UPDATE payments SET method=?, transfer_amount=?, cash_amount=?, updated_at=?"
-                " WHERE order_id=?",
+                "UPDATE payments SET method=?, transfer_amount=?, cash_amount=?, method_from_cash=0,"
+                " updated_at=? WHERE order_id=?",
                 (method, transfer, cash, db.now(), order_id),
             )
     return receipt_id
@@ -291,7 +294,9 @@ def check_proof(
     Every receipt becomes its own row with its own checks. Returns the payment
     record plus `receipt` (the new row), `resent` (True when this order already
     has a receipt with the same reference and the same readable amount: nothing is
-    stored then) and `inferred` (True when this receipt set the payment method).
+    stored then), `resent_discard_reason` (the staff's reason when the receipt it
+    repeats was discarded, else None) and `inferred` (True when this receipt set the
+    payment method).
 
     Never call it inside db.transaction(): it catches the reference's
     IntegrityError, and a rolled-back transaction cannot carry on."""
@@ -374,15 +379,20 @@ def check_proof(
         )
     except sqlite3.IntegrityError:
         owner = db.q1(
-            "SELECT order_id, extracted FROM payment_receipts WHERE reference=?", (reference,)
+            "SELECT order_id, extracted, status, discard_reason FROM payment_receipts"
+            " WHERE reference=?", (reference,)
         ) if reference else None
         if owner is None:
             raise
         # D3: a resend is the same receipt again on this order (even if discarded):
         # same reference AND the same amount, both readable. Any other repeat is red.
+        # A discarded one is still no new row, but the bot must give the staff's reason
+        # again instead of "ya lo teníamos" (C2 Part 2, Gap 2).
         if (owner["order_id"] == order_id and amount is not None
                 and amount == _ocr_amount(db.jloads(owner["extracted"], None))):
-            return {**current(order_id), "receipt": None, "resent": True, "inferred": False}
+            reason = owner["discard_reason"] if owner["status"] == "DISCARDED" else None
+            return {**current(order_id), "receipt": None, "resent": True,
+                    "resent_discard_reason": reason, "inferred": False}
         flags.append(f"Este comprobante ya fue usado antes (referencia {reference}).")
         # Stored without the reference (it belongs to the row that has it, on this
         # order or another); it stays readable in `extracted` and in the flag.
@@ -393,6 +403,7 @@ def check_proof(
     record = current(order_id)
     record["receipt"] = next(r for r in record["receipts"] if r["id"] == receipt_id)
     record["resent"] = False
+    record["resent_discard_reason"] = None
     # True when this receipt set the method (only a clean one does): the bot must
     # say so instead of asking how the customer will pay.
     record["inferred"] = inferred is not None
@@ -424,7 +435,7 @@ def confirm_receipt(order_id: int, receipt_id: int, amount=None) -> dict:
             ) from exc
     if received <= 0:
         raise PaymentError(
-            "El monto debe ser mayor que cero. Si el comprobante no sirve, use Descartar."
+            "El monto debe ser mayor que cero. Si el comprobante no sirve, descártelo con la X."
         )
 
     with db.transaction():
@@ -449,13 +460,13 @@ def confirm_receipt(order_id: int, receipt_id: int, amount=None) -> dict:
             if confirmed >= pay["total"]:
                 db.run(
                     "UPDATE payments SET method='TRANSFER', transfer_amount=?, cash_amount=0,"
-                    " updated_at=? WHERE order_id=?",
+                    " method_from_cash=0, updated_at=? WHERE order_id=?",
                     (pay["total"], db.now(), order_id),
                 )
             else:
                 db.run(
                     "UPDATE payments SET method='MIXED', transfer_amount=?, cash_amount=?,"
-                    " updated_at=? WHERE order_id=?",
+                    " method_from_cash=0, updated_at=? WHERE order_id=?",
                     (confirmed, pay["total"] - confirmed, db.now(), order_id),
                 )
     # It never writes payments.transfer_amount on a TRANSFER/MIXED order: the
@@ -466,11 +477,11 @@ def confirm_receipt(order_id: int, receipt_id: int, amount=None) -> dict:
 
 
 def discard_receipt(order_id: int, receipt_id: int, reason: str | None) -> dict:
-    """Only a person calls this, from the panel: the receipt is not a payment (a
-    wrong screenshot). `reason` is required: the customer is told it (main.py
-    sends the message) and the card shows it. It keeps its reference, so the
-    same screenshot is still refused on another order and still a resend on
-    this one."""
+    """Only a person calls this, from the panel (the X): the receipt is not a payment
+    (a wrong screenshot). `reason` is required: the customer is told it (main.py
+    sends the message). The row leaves the card but stays in the database and in
+    ESTADO REAL. It keeps its reference, so the same screenshot is still refused on
+    another order and still a resend on this one."""
     reason = (reason or "").strip()
     if not reason:
         raise PaymentError("Hace falta el motivo para avisarle al cliente.")
@@ -493,18 +504,13 @@ def discard_receipt(order_id: int, receipt_id: int, reason: str | None) -> dict:
 
 def follow_total(order_id: int) -> dict:
     """Called only by orders.amend, inside its transaction, once the order's new
-    total is already written. Returns code-computed numbers for the bot to
-    describe what changed - the model never invents them.
+    total is already written. It moves the agreed split to the new total and says
+    whether the bot must ask the method again (`ask_method`). What the customer is
+    told about money is brain.payment_sentence, built from current() afterwards.
 
-    A red receipt counts nothing, so it only follows the agreed split;
-    under_review keeps the bot from ever asking for that money again while a
-    person reviews it by hand."""
+    A red receipt counts nothing, so it only follows the agreed split."""
     before = current(order_id)
     total, method = before["total"], before["method"]
-    change = {
-        "sent": 0, "cash": 0, "missing": 0, "cash_due": 0, "surplus": 0,
-        "under_review": before["under_review"], "ask_method": False,
-    }
 
     if not any(r["status"] in ("PROOF_RECEIVED", "CONFIRMED") for r in before["receipts"]):
         # Nothing counts yet (no receipt, or only red/discarded ones).
@@ -517,14 +523,11 @@ def follow_total(order_id: int) -> dict:
             else:
                 db.run(
                     "UPDATE payments SET method='UNSPECIFIED', transfer_amount=0, cash_amount=0,"
-                    " updated_at=? WHERE order_id=?",
+                    " method_from_cash=0, updated_at=? WHERE order_id=?",
                     (db.now(), order_id),
                 )
-                change["ask_method"] = True
-        after = current(order_id)
-        change.update(cash=after["cash_received"], surplus=after["overpayment_amount"])
-        change["cash_due"] = after["cash_due"] if after["cash_received"] else 0
-        return change
+                return {"ask_method": True}
+        return {"ask_method": False}
 
     if method == "MIXED":
         transfer = min(before["transfer_amount"], total)
@@ -535,24 +538,18 @@ def follow_total(order_id: int) -> dict:
     else:
         db.run(
             "UPDATE payments SET method='TRANSFER', transfer_amount=?, cash_amount=0,"
-            " updated_at=? WHERE order_id=?",
+            " method_from_cash=0, updated_at=? WHERE order_id=?",
             (total, db.now(), order_id),
         )
-    after = current(order_id)
-    change.update(
-        sent=after["sent"], cash=after["cash_received"], missing=after["transfer_due"],
-        surplus=after["overpayment_amount"],
-    )
-    if method == "MIXED":
-        change["cash_due"] = after["cash_due"]
-    return change
+    return {"ask_method": False}
 
 
 def register_cash(order_id: int, amount) -> dict:
-    """Staff collected cash at handover. Never more than what is still owed: the
-    change the customer gets back is the restaurant's business and never enters
-    the system. On an order whose method was never chosen, a person collecting
-    cash settles it: the method becomes CASH, in the same transaction."""
+    """Staff collected cash at handover: one cash_payments row per registration.
+    Never more than what is still owed: the change the customer gets back is the
+    restaurant's business and never enters the system. On an order whose method was
+    never chosen, a person collecting cash settles it: the method becomes CASH, marked
+    method_from_cash, in the same transaction."""
     try:
         amount = pesos(amount)
     except MoneyError as exc:
@@ -568,25 +565,72 @@ def register_cash(order_id: int, amount) -> dict:
         )
     with db.transaction():
         db.run(
-            "UPDATE payments SET cash_received = cash_received + ?, updated_at=? WHERE order_id=?",
-            (amount, db.now(), order_id),
+            "INSERT INTO cash_payments(order_id, amount, registered_at) VALUES(?,?,?)",
+            (order_id, amount, db.now()),
         )
+        db.run("UPDATE payments SET updated_at=? WHERE order_id=?", (db.now(), order_id))
         # Written directly, not through set_method: a config without CASH among its
         # methods must not stop staff from registering cash they already hold.
         db.run(
-            "UPDATE payments SET method='CASH', transfer_amount=0, cash_amount=?"
+            "UPDATE payments SET method='CASH', transfer_amount=0, cash_amount=?, method_from_cash=1"
             " WHERE order_id=? AND method='UNSPECIFIED'",
             (before["total"], order_id),
         )
     return current(order_id)
 
 
+def discard_cash(order_id: int, cash_id: int, reason: str | None) -> dict:
+    """Only a person calls this, from the panel (the X on a cash row): that cash
+    registration was a mistake. `reason` is required and stored; nobody is told, and
+    the row then counts nothing anywhere. When no cash is left on an order whose
+    method only cash had set (method_from_cash), the method goes back to UNSPECIFIED;
+    a method the customer chose, or that a receipt set later, stays. Receipts are never
+    re-checked: one that went red because this cash paid it all stays red."""
+    reason = (reason or "").strip()
+    if not reason:
+        raise PaymentError("Hace falta el motivo.")
+    row = db.q1("SELECT order_id, status FROM cash_payments WHERE id=?", (cash_id,))
+    if row is None or row["order_id"] != order_id:
+        raise PaymentError("Ese efectivo no es de este pedido.")
+    if row["status"] == "DISCARDED":
+        raise PaymentError("Ese efectivo ya está descartado.")
+    with db.transaction():
+        db.run(
+            "UPDATE cash_payments SET status='DISCARDED', discarded_at=?, discard_reason=?"
+            " WHERE id=?",
+            (db.now(), reason, cash_id),
+        )
+        left = db.q1(
+            "SELECT COUNT(*) AS n FROM cash_payments WHERE order_id=? AND status='RECEIVED'",
+            (order_id,),
+        )["n"]
+        if not left:
+            db.run(
+                "UPDATE payments SET method='UNSPECIFIED', transfer_amount=0, cash_amount=0,"
+                " method_from_cash=0 WHERE order_id=? AND method='CASH' AND method_from_cash=1",
+                (order_id,),
+            )
+        db.run("UPDATE payments SET updated_at=? WHERE order_id=?", (db.now(), order_id))
+    record = current(order_id)
+    record["cash_row"] = next(c for c in record["cash"] if c["id"] == cash_id)
+    return record
+
+
+def cash_rows(order_id: int) -> list[dict]:
+    """Every cash registration of an order, oldest first, discarded ones included."""
+    return [dict(row) for row in db.q(
+        "SELECT id, order_id, amount, status, registered_at, discarded_at, discard_reason"
+        " FROM cash_payments WHERE order_id=? ORDER BY id",
+        (order_id,),
+    )]
+
+
 def current(order_id: int) -> dict:
-    # The legacy payments columns are named out of this query on purpose, so they
-    # never leak into the JSON the panel reads.
+    # The legacy payments columns (cash_received included) are named out of this query
+    # on purpose, so they never leak into the JSON the panel reads.
     row = db.q1(
         "SELECT p.id, p.order_id, p.method, p.transfer_amount, p.cash_amount,"
-        " p.cash_received, p.updated_at, o.total AS total FROM payments p"
+        " p.method_from_cash, p.updated_at, o.total AS total FROM payments p"
         " JOIN orders o ON o.id = p.order_id WHERE p.order_id=?",
         (order_id,),
     )
@@ -596,6 +640,9 @@ def current(order_id: int) -> dict:
     total = data["total"]
     found = receipts(order_id)
     states = {r["status"] for r in found}
+    cash = cash_rows(order_id)
+    # Registered cash is the sum of the rows nobody discarded.
+    data["cash_received"] = sum(c["amount"] for c in cash if c["status"] == "RECEIVED")
 
     sent = sum(r["counted"] for r in found)
     # Registered cash already paid part of the order, so the agreed transfer can't
@@ -604,17 +651,17 @@ def current(order_id: int) -> dict:
     cash_due = max(total - sent - data["cash_received"] - transfer_due, 0)
     # The one place that says how much is paid - every caller reads this instead
     # of computing its own. Confirmed receipts count, and cash counts once staff
-    # register it; a discarded receipt counts nothing. `paid` is capped at the total;
-    # what goes beyond it is overpayment_amount (below), which counts receipts and
-    # registered cash. Cash is never registered above `outstanding` (register_cash),
-    # so a surplus that involves cash comes from a transfer that overlaps it, or from
-    # an edit that lowered the total afterwards. Either way it is money owed to the
-    # customer, and a person resolves it. `sent` already counts clean receipts that
-    # still wait, so the surplus shows as soon as cash goes on top of one.
+    # register it; a discarded receipt or cash row counts nothing. `paid` is capped at
+    # the total; what goes beyond it is overpayment_amount (below), which counts
+    # receipts and registered cash. Cash is never registered above `outstanding`
+    # (register_cash), so a surplus that involves cash comes from a transfer that
+    # overlaps it, or from an edit that lowered the total afterwards. Either way it is
+    # money owed to the customer, and a person resolves it. `sent` already counts clean
+    # receipts that still wait, so the surplus shows as soon as cash goes on top of one.
     confirmed = sum(r["confirmed_amount"] or 0 for r in found if r["status"] == "CONFIRMED")
     paid = min(confirmed + data["cash_received"], total)
-    # Clean receipts nobody has confirmed yet, at their OCR amount: the cash dialog
-    # warns about them.
+    # Clean receipts nobody has confirmed yet, at their OCR amount: the payment
+    # sentence says they wait for the restaurant.
     unconfirmed = sum(r["counted"] for r in found if r["status"] == "PROOF_RECEIVED")
 
     # The order-level status is derived: the worst receipt wins, discarded ones are ignored.
@@ -624,8 +671,14 @@ def current(order_id: int) -> dict:
     else:
         status = "PENDING"
     return {
-        **data, "receipts": found, "sent": sent, "transfer_due": transfer_due,
+        **data, "receipts": found, "cash": cash, "sent": sent, "transfer_due": transfer_due,
         "cash_due": cash_due, "paid": paid, "outstanding": max(total - paid, 0),
+        # What the customer still has to send, counting receipts that wait for a person:
+        # always transfer_due + cash_due. The payment sentence asks for nothing beyond it.
+        "to_pay": max(total - sent - data["cash_received"], 0),
+        "confirmed": confirmed,
+        # Money that really came in, not capped at the total (Reportes, "Dinero recibido").
+        "received": confirmed + data["cash_received"],
         "overpayment_amount": max(sent + data["cash_received"] - total, 0),
         # The same surplus counting only what a person confirmed: a receipt that still
         # waits may turn out wrong, so the customer is never told about it as a surplus.

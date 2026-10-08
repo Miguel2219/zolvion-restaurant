@@ -712,8 +712,9 @@ def test_cash_up_to_outstanding_never_makes_a_surplus():
     assert completed["paid"] == ESPECIAL
 
 
-def test_unconfirmed_amount_drives_the_cash_warning():
-    """Only clean receipts nobody has confirmed yet count, at their OCR amount."""
+def test_unconfirmed_amount_counts_only_clean_waiting_receipts():
+    """Only clean receipts nobody has confirmed yet count, at their OCR amount. The payment
+    sentence reads it; the cash dialog no longer warns about it (C2 Part 2)."""
     order = _confirmed_order()                       # UNSPECIFIED, total ESPECIAL
     def unconfirmed():
         return payments.current(order["id"])["unconfirmed_amount"]
@@ -737,12 +738,12 @@ def test_unconfirmed_amount_drives_the_cash_warning():
     payments.discard_receipt(order["id"], cash_part["receipt"]["id"], "Llegó por error")
     assert unconfirmed() == 0
 
-    # The dialog reads that field and shows the warning.
+    # Cash registered by mistake is fixed with the X on its row: no warning in the dialog.
     html = (Path(__file__).resolve().parent.parent / "static" / "kitchen.html").read_text(
         encoding="utf-8"
     )
-    assert "Hay comprobantes sin confirmar por " in html
-    assert "unconfirmed_amount" in html
+    assert "Hay comprobantes sin confirmar" not in html
+    assert "unconfirmed_amount" not in html
 
 
 # ---- cash settles the method; ESTADO REAL says when it is paid (P-6455) ------
@@ -849,7 +850,10 @@ def test_choosing_a_method_after_cash_goes_to_a_person():
     """An order that got cash before cash settled the method (P-6455 itself): even
     choosing one goes to a person."""
     order = _confirmed_order()
-    db.run("UPDATE payments SET cash_received=? WHERE order_id=?", (ESPECIAL, order["id"]))
+    db.run(                                          # a cash row that did not settle the method
+        "INSERT INTO cash_payments(order_id, amount, registered_at) VALUES(?,?,?)",
+        (order["id"], ESPECIAL, db.now()),
+    )
     result = brain._run_tool(PHONE, "choose_payment", {"method": "CASH"})
     assert result.startswith("PASADO A UNA PERSONA")
     assert orders.get(order["id"])["payment"]["method"] == "UNSPECIFIED"
@@ -1470,7 +1474,14 @@ def test_edit_below_a_receipt_records_the_surplus():
     assert "error interno" not in result
     payment = orders.get(order["id"])["payment"]
     assert payment["overpayment_amount"] == GASEOSA
-    assert f"Ya envió {fmt(ESPECIAL + GASEOSA)}, {fmt(GASEOSA)} más que el nuevo total" in result
+    # The receipt nobody confirmed is never "paid", and its surplus is not money owed back.
+    assert (
+        f"«Su comprobante por {fmt(ESPECIAL + GASEOSA)} está pendiente de confirmación del "
+        "local. Por ahora no necesita realizar otro pago. Con su comprobante pendiente, lo "
+        "enviado supera el total del pedido; el local revisará la diferencia cuando lo "
+        "confirme.»" in result
+    )
+    assert "No le prometas devolución" in result
 
 
 @pytest.mark.parametrize("with_transfer", [False, True])
@@ -1485,15 +1496,19 @@ def test_edit_below_registered_cash_reports_the_surplus(with_transfer):
         record = _receipt(order["id"], 10000, "EDITCASH-1")          # infers MIXED
         payments.confirm_receipt(order["id"], record["receipt"]["id"])
         payments.register_cash(order["id"], payments.current(order["id"])["outstanding"])
-        paid_in = f"Entre transferencias y efectivo ya pagó {fmt(ESPECIAL + GASEOSA)}"
+        paid_in = (f"Ya pagó {fmt(ESPECIAL + GASEOSA - 10000)} en efectivo. El local ya "
+                   f"confirmó su transferencia de {fmt(10000)}.")
     else:
         payments.set_method(order["id"], "CASH")
         payments.register_cash(order["id"], ESPECIAL + GASEOSA)
-        paid_in = f"Ya pagó {fmt(ESPECIAL + GASEOSA)} en efectivo"
+        paid_in = f"Ya pagó {fmt(ESPECIAL + GASEOSA)} en efectivo."
 
     result = brain._run_tool(PHONE, "remove_item", {"item_id": "d_gaseosa_personal"})
     assert "error interno" not in result
-    assert f"{paid_in}, {fmt(GASEOSA)} más que el nuevo total" in result
+    assert (
+        f"«{paid_in} Su pedido ya está pagado completo. Pagó {fmt(GASEOSA)} más que el total "
+        "del pedido; el local se comunicará con usted por esa diferencia.»" in result
+    )
     assert "No le prometas devolución" in result
     assert orders.get(order["id"])["payment"]["overpayment_amount"] == GASEOSA
 
@@ -1620,7 +1635,7 @@ def test_same_reference_with_another_amount_is_a_red_row(monkeypatch):
         "amount": GASEOSA, "destination_account": ACCOUNT, "reference": "SAME-1",
         "date_iso": _iso(),
     })
-    monkeypatch.setattr(brain, "reply", lambda phone, message: told.append(message) or "ok")
+    monkeypatch.setattr(brain, "reply", lambda phone, message, **kw: told.append(message) or "ok")
 
     main.handle(PHONE, None, wa.image_block(b"img-2", "image/png"), db.now())
 
@@ -1851,7 +1866,7 @@ def test_confirm_refuses_zero(monkeypatch):
     client = _client(monkeypatch)
     order = _transfer_order()
     receipt = _receipt(order["id"], ESPECIAL, "ZERO-1")["receipt"]
-    with pytest.raises(payments.PaymentError, match="Descartar"):
+    with pytest.raises(payments.PaymentError, match="descártelo con la X"):
         payments.confirm_receipt(order["id"], receipt["id"], 0)
     assert payments.receipts(order["id"])[0]["status"] == "PROOF_RECEIVED"
 
@@ -1860,7 +1875,7 @@ def test_confirm_refuses_zero(monkeypatch):
         f"/api/orders/{order['id']}/receipts/{receipt['id']}/confirm", json={"amount": 0}
     )
     assert response.status_code == 400
-    assert "Descartar" in response.json()["error"]
+    assert "descártelo con la X" in response.json()["error"]
     assert payments.receipts(order["id"])[0]["status"] == "PROOF_RECEIVED"
     assert _outbound_count() == before               # nothing reaches the customer
 
@@ -2113,12 +2128,12 @@ def test_handle_stores_the_photo_and_answers_a_resend(monkeypatch):
     }
     told = []
     monkeypatch.setattr(brain, "extract_proof", lambda image: extracted)
-    monkeypatch.setattr(brain, "reply", lambda phone, message: told.append(message) or "ok")
+    monkeypatch.setattr(brain, "reply", lambda phone, message, **kw: told.append(message) or "ok")
     image = wa.image_block(b"img", "image/png")
 
     assert main.handle(PHONE, None, image, db.now()) == "ok"
     assert db.q1("SELECT COUNT(*) AS n FROM receipt_photos")["n"] == 1
-    assert "recibió el comprobante" in told[-1]
+    assert "recibió un comprobante" in told[-1]
     stored = payments.receipts(order["id"])[0]
     assert payments.photo(stored["id"]) == (b"img", "image/png")
 
@@ -2206,7 +2221,7 @@ def _handle_receipt(monkeypatch, extracted) -> str:
     monkeypatch.setattr(wa, "live", lambda: False)
     told = []
     monkeypatch.setattr(brain, "extract_proof", lambda image: extracted)
-    monkeypatch.setattr(brain, "reply", lambda phone, message: told.append(message) or "ok")
+    monkeypatch.setattr(brain, "reply", lambda phone, message, **kw: told.append(message) or "ok")
     main.handle(PHONE, None, wa.image_block(b"img", "image/png"), db.now())
     return told[-1]
 
@@ -2222,8 +2237,10 @@ def test_clean_receipt_for_the_total_says_the_method_it_settled(monkeypatch):
     order = _confirmed_order()                           # no method chosen yet
     told = _handle_receipt(monkeypatch, _good(ESPECIAL, "SETTLE-1"))
     assert payments.current(order["id"])["method"] == "TRANSFER"
-    assert f"recibimos su comprobante por {fmt(ESPECIAL)}" in told
-    assert f"el pago quedó por transferencia por el total ({fmt(ESPECIAL)})" in told
+    assert f"recibió un comprobante por {fmt(ESPECIAL)}" in told
+    assert "Con este comprobante quedó definida la forma de pago" in told
+    assert (f"«Su comprobante por {fmt(ESPECIAL)} está pendiente de confirmación del local. "
+            "Por ahora no necesita realizar otro pago.»") in told
     assert "una persona del local lo va a revisar" in told
     assert "No le preguntes cómo va a pagar" in told
     assert "NO le digas que ya está confirmado" in told
@@ -2231,13 +2248,16 @@ def test_clean_receipt_for_the_total_says_the_method_it_settled(monkeypatch):
     assert "cocina" not in told.lower()
 
 
-def test_clean_partial_receipt_says_parte_y_parte(monkeypatch):
+def test_clean_partial_receipt_gives_the_payment_sentence(monkeypatch):
+    """The R1 re-run (6 Oct): the instruction said "en parte y parte" and the bot made up
+    the cash side. Now the code-built sentence says it."""
     order = _confirmed_order()
     part = 10000
     told = _handle_receipt(monkeypatch, _good(part, "SETTLE-2"))
     assert payments.current(order["id"])["method"] == "MIXED"
-    assert f"en parte y parte, {fmt(part)} por transferencia" in told
-    assert f"Quedan {fmt(ESPECIAL - part)} por pagar en efectivo al recibir" in told
+    assert "parte y parte" not in told
+    assert (f"«Su comprobante por {fmt(part)} está pendiente de confirmación del local. "
+            f"Quedan {fmt(ESPECIAL - part)} por pagar en efectivo al recibir.»") in told
     assert "No le preguntes cómo va a pagar" in told
     line = _payment_line(brain.system_prompt(PHONE))
     assert line.startswith("- Pago del pedido más reciente: parte por transferencia y parte en efectivo;")
@@ -2250,9 +2270,9 @@ def test_clean_partial_receipt_says_parte_y_parte(monkeypatch):
 def test_clean_receipt_on_a_chosen_method_claims_no_inference(monkeypatch):
     _transfer_order()
     told = _handle_receipt(monkeypatch, _good(ESPECIAL, "SETTLE-3"))
-    assert f"recibimos su comprobante por {fmt(ESPECIAL)}" in told
+    assert f"recibió un comprobante por {fmt(ESPECIAL)}" in told
     assert "una persona del local lo va a revisar" in told
-    assert "el pago quedó" not in told
+    assert "quedó definida la forma de pago" not in told
 
 
 def test_inferred_is_true_only_when_the_receipt_set_the_method():
@@ -2350,7 +2370,9 @@ def test_receipt_turn_shows_the_receipt_to_the_model(monkeypatch):
         "- Pago del pedido más reciente: por transferencia; comprobantes: 1 recibido"
     )
     assert "no se lo vuelvas a preguntar" in _real_state_block(seen[1])
-    assert f"el pago quedó por transferencia por el total ({fmt(ESPECIAL)})" in instruction
+    assert "Con este comprobante quedó definida la forma de pago" in instruction
+    assert (f"«Su comprobante por {fmt(ESPECIAL)} está pendiente de confirmación del local. "
+            "Por ahora no necesita realizar otro pago.»") in instruction
 
 
 def test_tool_calls_are_logged_with_the_last_digits_only(monkeypatch, capsys):
@@ -2723,3 +2745,615 @@ def test_notify_never_enters_the_model_history():
     order = _confirmed_order()
     _notified(order["id"], "staff_accepts")
     assert PHONE not in brain._history
+
+
+# ---- Task C2 Part 2: the "Pagos" block ---------------------------------------
+
+MINI = CATALOG.price_of("d_gaseosa_mini")          # 2500
+ACCOUNT_TEXT = " o ".join(
+    f"{a['provider']} {a['number']} a nombre de {a['holder']}" for a in CATALOG.accounts()
+)
+TRANSFER_TAIL = f" Puede transferir a {ACCOUNT_TEXT}. Cuando transfiera, envíenos el comprobante."
+
+
+def _order_of(*items, method=None, transfer=None):
+    """A confirmed pickup order with these (item_id, qty) lines."""
+    for item_id, qty in items:
+        cart.add_item(PHONE, item_id, qty)
+    order = orders.create_from_cart(PHONE, "PICKUP")
+    orders.apply_event(order["id"], "customer_confirms")
+    if method:
+        payments.set_method(order["id"], method, transfer)
+    return orders.get(order["id"])
+
+
+def _cash_ids(order_id):
+    return [c["id"] for c in payments.current(order_id)["cash"]]
+
+
+@pytest.fixture
+def chat():
+    brain.forget(PHONE)
+    yield
+    brain.forget(PHONE)
+
+
+def _say(text):
+    return types.SimpleNamespace(
+        stop_reason="end_turn", content=[types.SimpleNamespace(type="text", text=text)]
+    )
+
+
+def _use(name, args=None, block_id="t1"):
+    return types.SimpleNamespace(stop_reason="tool_use", content=[
+        types.SimpleNamespace(type="tool_use", id=block_id, name=name, input=args or {}),
+    ])
+
+
+def _scripted(monkeypatch, *responses):
+    """The model answers `responses` in order; every call's keyword arguments are kept."""
+    calls, queue = [], list(responses)
+
+    class Messages:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return queue.pop(0)
+
+    monkeypatch.setattr(brain, "_model", "test-model")
+    monkeypatch.setattr(brain, "client", lambda: types.SimpleNamespace(messages=Messages()))
+    return calls
+
+
+def _customer_says(text):
+    from app import main
+    return main.handle(PHONE, text, None, db.now())
+
+
+def _last_sent_in_history():
+    return brain._history[PHONE][-1]["content"][0]["text"]
+
+
+# -- cash rows and the X --------------------------------------------------------
+
+def test_each_cash_registration_is_its_own_row(monkeypatch):
+    client = _client(monkeypatch)
+    order = _order_of(("b_caserita", 1), method="CASH")
+    payments.register_cash(order["id"], 5000)
+    record = payments.register_cash(order["id"], 2400)
+    assert [(c["amount"], c["status"]) for c in record["cash"]] == [
+        (5000, "RECEIVED"), (2400, "RECEIVED")]
+    assert all(c["registered_at"] for c in record["cash"])
+    assert record["cash_received"] == 7400
+    assert record["outstanding"] == CASERITA - 7400            # "faltan $11.500"
+    card = next(o for o in client.get("/api/board").json()["orders"] if o["id"] == order["id"])
+    assert [c["amount"] for c in card["payment"]["cash"]] == [5000, 2400]
+
+
+def test_cash_discard_needs_a_reason_and_tells_nobody(monkeypatch):
+    client = _client(monkeypatch)
+    order = _order_of(("d_gaseosa_mini", 1), method="CASH")
+    payments.register_cash(order["id"], MINI)
+    cash_id = _cash_ids(order["id"])[0]
+    url = f"/api/orders/{order['id']}/cash/{cash_id}/discard"
+    before = _outbound_count()
+    for response in (client.post(url), client.post(url, json={}),
+                     client.post(url, json={"reason": "   "})):
+        assert response.status_code == 400
+        assert response.json()["error"] == "Hace falta el motivo."
+    assert payments.current(order["id"])["paid"] == MINI          # nothing changed
+
+    wrong = client.post(f"/api/orders/{order['id'] + 99}/cash/{cash_id}/discard",
+                        json={"reason": "Error"})
+    assert wrong.json()["error"] == "Ese efectivo no es de este pedido."
+    done = client.post(url, json={"reason": "  Se registró en el pedido equivocado  "})
+    assert done.status_code == 200
+    record = done.json()
+    assert record["cash_row"]["status"] == "DISCARDED"
+    assert record["cash_row"]["discard_reason"] == "Se registró en el pedido equivocado"
+    assert (record["cash_received"], record["paid"], record["outstanding"]) == (0, 0, MINI)
+    assert record["method"] == "CASH"                            # the customer chose it
+    assert _outbound_count() == before                           # no message, ever
+    again = client.post(url, json={"reason": "Otra vez"})
+    assert again.json()["error"] == "Ese efectivo ya está descartado."
+
+
+def test_discarded_cash_counts_nowhere():
+    order = _transfer_order()
+    receipt = _receipt(order["id"], ESPECIAL, "NOWHERE-1")["receipt"]   # clean, waiting
+    payments.register_cash(order["id"], ESPECIAL)
+    assert payments.current(order["id"])["overpayment_amount"] == ESPECIAL   # "Sobrepago"
+    payments.discard_cash(order["id"], _cash_ids(order["id"])[0], "Era de otro pedido")
+    after = payments.current(order["id"])
+    assert (after["cash_received"], after["paid"], after["overpayment_amount"]) == (0, 0, 0)
+    assert after["received"] == 0
+    assert after["receipts"][0]["id"] == receipt["id"]
+    assert {k["kind"]: k["orders"] for k in reports.snapshot(1)["how_paid"]}["NONE"] == 1
+
+
+# -- Gap 1: discarding cash and the method ---------------------------------------
+
+@pytest.mark.parametrize("first", ["5000", "2400"])
+def test_the_method_cash_set_goes_back_with_the_last_cash_row(first):
+    order = _order_of(("b_caserita", 1))                        # no method chosen
+    payments.register_cash(order["id"], 5000)
+    assert payments.current(order["id"])["method_from_cash"] == 1
+    payments.register_cash(order["id"], 2400)
+    five, two = _cash_ids(order["id"])
+    one, last = (five, two) if first == "5000" else (two, five)
+    after = payments.discard_cash(order["id"], one, "Error")
+    assert after["method"] == "CASH"                             # cash is still registered
+    after = payments.discard_cash(order["id"], last, "Error")
+    assert (after["method"], after["transfer_amount"], after["cash_amount"],
+            after["method_from_cash"]) == ("UNSPECIFIED", 0, 0, 0)
+    assert after["paid"] == 0
+
+
+@pytest.mark.parametrize("method", ["TRANSFER", "MIXED", "CASH"])
+def test_discarded_cash_keeps_a_chosen_method(method):
+    order = _order_of(("b_caserita", 1), method=method,
+                      transfer=10000 if method == "MIXED" else None)
+    before = payments.current(order["id"])
+    payments.register_cash(order["id"], 5000)
+    after = payments.discard_cash(order["id"], _cash_ids(order["id"])[0], "Error")
+    assert (after["method"], after["transfer_amount"], after["cash_amount"]) == (
+        before["method"], before["transfer_amount"], before["cash_amount"])
+
+
+def test_a_method_a_receipt_set_later_is_never_reset():
+    order = _confirmed_order()                                   # no method
+    payments.register_cash(order["id"], 10000)                   # CASH, set by cash
+    clean = _receipt(order["id"], ESPECIAL - 10000, "LATER-1")
+    assert clean["inferred"] is True and clean["method"] == "MIXED"
+    assert clean["method_from_cash"] == 0
+    after = payments.discard_cash(order["id"], _cash_ids(order["id"])[0], "Error")
+    assert after["method"] == "MIXED"
+
+
+def test_a_red_receipt_stays_red_after_its_cash_is_discarded():
+    order = _order_of(("d_gaseosa_mini", 1))                    # no method
+    payments.register_cash(order["id"], MINI)
+    red = _receipt(order["id"], MINI, "STAYRED-1")["receipt"]
+    assert red["flags"] == ["No se esperaba otro pago."]
+    after = payments.discard_cash(order["id"], _cash_ids(order["id"])[0], "Error")
+    assert after["method"] == "UNSPECIFIED"
+    assert after["receipts"][0]["status"] == "FLAGGED"          # no automatic re-check
+    assert after["receipts"][0]["flags"] == ["No se esperaba otro pago."]
+    confirmed = payments.confirm_receipt(order["id"], red["id"], MINI)
+    assert (confirmed["method"], confirmed["paid"]) == ("TRANSFER", MINI)
+
+
+# -- Gap 2: a discarded receipt sent again ---------------------------------------
+
+def test_a_discarded_receipt_sent_again_gets_the_reason(monkeypatch):
+    from app import main
+    order = _transfer_order()
+    first = _receipt(order["id"], ESPECIAL, "AGAIN-1")["receipt"]
+    payments.discard_receipt(order["id"], first["id"], "No es de este pedido")
+    told = []
+    monkeypatch.setattr(brain, "extract_proof", lambda image: _good(ESPECIAL, "AGAIN-1"))
+    monkeypatch.setattr(brain, "reply", lambda phone, message, **kw:
+                        told.append(message) or "Ese comprobante ya lo habíamos revisado.")
+    image = wa.image_block(b"img", "image/png")
+    assert main.handle(PHONE, None, image, db.now()) == "Ese comprobante ya lo habíamos revisado."
+    assert len(payments.receipts(order["id"])) == 1             # no new row
+    assert '"No es de este pedido"' in told[-1]
+    assert "No le digas que ya lo teníamos" in told[-1]
+    assert "ya lo teníamos" not in told[-1].replace("No le digas que ya lo teníamos", "")
+
+    # The guard of the discard message: an amount, "confirmad", the code or "cocina".
+    monkeypatch.setattr(brain, "reply", lambda phone, message, **kw: "Su pago de $29.900 no cuenta.")
+    monkeypatch.setattr(brain, "correct_last_reply", lambda phone, text: None)
+    assert main.handle(PHONE, None, image, db.now()) == main.RESEND_DISCARDED_TEMPLATE.format(
+        reason="No es de este pedido")
+
+    other = _second_transfer_order()
+    reused = _receipt(other["id"], ESPECIAL, "AGAIN-1")
+    assert reused["receipt"]["status"] == "FLAGGED"
+    assert "Este comprobante ya fue usado antes (referencia AGAIN-1)." in reused["receipt"]["flags"]
+
+
+# -- the payment sentence --------------------------------------------------------
+
+def _g29_order():
+    order = _order_of(("b_caserita", 1), method="MIXED", transfer=10000)
+    payments.register_cash(order["id"], 5000)
+    return order
+
+
+def _sentence_cases():
+    def g29():
+        _g29_order()
+        brain._run_tool(PHONE, "add_item", {"item_id": "d_gaseosa_personal"})
+        return (f"Ya pagó {fmt(5000)} en efectivo. Quedan {fmt(10000)} por transferir y "
+                f"{fmt(7400)} por pagar en efectivo al recibir." + TRANSFER_TAIL)
+
+    def g30():
+        order = _order_of(("b_caserita", 1), method="TRANSFER")
+        payments.register_cash(order["id"], 5000)
+        brain._run_tool(PHONE, "add_item", {"item_id": "d_gaseosa_personal"})
+        return f"Ya pagó {fmt(5000)} en efectivo. Quedan {fmt(17400)} por transferir." + TRANSFER_TAIL
+
+    def r1():
+        order = _order_of(("d_gaseosa_mini", 2))
+        payments.register_cash(order["id"], MINI)
+        _receipt(order["id"], MINI, "SENT-R1")
+        return (f"Ya pagó {fmt(MINI)} en efectivo. Su comprobante por {fmt(MINI)} está pendiente "
+                "de confirmación del local. Por ahora no necesita realizar otro pago.")
+
+    def red_only():
+        order = _transfer_order()
+        _receipt(order["id"], ESPECIAL, "SENT-RED", destination_account="3009998877")
+        return "El local está revisando un comprobante que nos envió y se comunicará con usted."
+
+    def red_and_paid():
+        order = _transfer_order()
+        good = _receipt(order["id"], ESPECIAL, "SENT-PAID")["receipt"]
+        payments.confirm_receipt(order["id"], good["id"])
+        _receipt(order["id"], 1000, "SENT-EXTRA")                 # red: nothing more owed
+        return (f"El local ya confirmó su transferencia de {fmt(ESPECIAL)}. El local está "
+                "revisando un comprobante que nos envió y se comunicará con usted. Su pedido ya "
+                "está pagado completo.")
+
+    def all_discarded():
+        order = _confirmed_order()
+        payments.register_cash(order["id"], ESPECIAL)
+        payments.discard_cash(order["id"], _cash_ids(order["id"])[0], "Error")
+        return f"Falta por pagar {fmt(ESPECIAL)}."
+
+    def cash_chosen():
+        _order_of(("b_especial", 1), method="CASH")
+        return f"Quedan {fmt(ESPECIAL)} por pagar en efectivo al recibir."
+
+    return {f.__name__: f for f in (g29, g30, r1, red_only, red_and_paid, all_discarded, cash_chosen)}
+
+
+@pytest.mark.parametrize("case", list(_sentence_cases()))
+def test_payment_sentence(case):
+    expected = _sentence_cases()[case]()
+    sentence = brain.payment_sentence_for(PHONE)
+    assert sentence == expected
+    code = brain._payment_order(PHONE)["code"]
+    assert code not in sentence and "cocina" not in sentence.lower()
+    if "revisando" in expected:
+        assert "Puede transferir" not in sentence                # no request while red
+
+
+def test_two_live_orders_say_which_order_the_sentence_is_about():
+    first = _accepted_order()
+    second = _order_of(("b_caserita", 1))
+    assert second["id"] > first["id"]
+    assert brain.payment_sentence_for(PHONE) == (
+        f"En su pedido más reciente: falta por pagar {fmt(CASERITA)}.")
+
+
+# -- choose_payment carries the sentence (no unconditional receipt request) -------
+
+def test_choose_payment_cash_never_asks_for_a_receipt():
+    _confirmed_order()
+    result = brain._run_tool(PHONE, "choose_payment", {"method": "CASH"})
+    assert f"«Quedan {fmt(ESPECIAL)} por pagar en efectivo al recibir.»" in result
+    assert "comprobante" not in result
+    assert ACCOUNT not in result
+
+
+def test_choose_payment_transfer_asks_for_the_receipt_once():
+    _confirmed_order()
+    result = brain._run_tool(PHONE, "choose_payment", {"method": "TRANSFER"})
+    assert f"«Quedan {fmt(ESPECIAL)} por transferir.{TRANSFER_TAIL}»" in result
+    assert result.count("comprobante") == 1
+    assert result.count(ACCOUNT) == 1
+
+
+def test_choose_payment_mixed_names_both_parts():
+    _confirmed_order()
+    result = brain._run_tool(
+        PHONE, "choose_payment", {"method": "MIXED", "transfer_amount": 10000})
+    assert (f"«Quedan {fmt(10000)} por transferir y {fmt(ESPECIAL - 10000)} por pagar en "
+            f"efectivo al recibir.{TRANSFER_TAIL}»") in result
+    assert result.count("comprobante") == 1
+
+
+# -- the end-of-turn check -------------------------------------------------------
+
+def _added_gaseosa_sentence():
+    return f"Quedan {fmt(ESPECIAL + GASEOSA)} por transferir." + TRANSFER_TAIL
+
+
+def test_a_missing_sentence_is_appended_without_another_call(monkeypatch, chat):
+    _transfer_order()
+    calls = _scripted(monkeypatch, _use("add_item", {"item_id": "d_gaseosa_personal"}),
+                      _say("Listo, le agregué la gaseosa."))
+    reply = _customer_says("Agrégueme una gaseosa personal")
+    assert reply == f"Listo, le agregué la gaseosa.\n\n{_added_gaseosa_sentence()}"
+    assert len(calls) == 2
+    assert _last_sent_in_history() == reply
+
+
+def test_a_contradictory_draft_is_corrected_once(monkeypatch, chat):
+    _transfer_order()
+    good = f"Listo, le agregué la gaseosa. {_added_gaseosa_sentence()}"
+    calls = _scripted(
+        monkeypatch, _use("add_item", {"item_id": "d_gaseosa_personal"}),
+        _say(f"Listo. {_added_gaseosa_sentence()} Su pedido ya está pagado."), _say(good))
+    assert _customer_says("Agrégueme una gaseosa personal") == good
+    assert len(calls) == 3
+    assert calls[2]["tool_choice"] == {"type": "none"}
+    assert "Tu borrador anterior" in calls[2]["system"]
+    assert _last_sent_in_history() == good
+
+
+def test_still_wrong_after_the_correction_sends_the_safe_reply(monkeypatch, chat):
+    order = _transfer_order()
+    _scripted(monkeypatch, _use("add_item", {"item_id": "d_gaseosa_personal"}),
+              _say("Su pedido ya está pagado."), _say("Ya quedó pagado, gracias."))
+    reply = _customer_says("Agrégueme una gaseosa personal")
+    updated = orders.get(order["id"])
+    assert reply == ("Listo, su pedido quedó actualizado:\n" + brain._order_text(updated)
+                     + "\n\n" + _added_gaseosa_sentence())          # the edit is still confirmed
+    assert "ya está pagado" not in reply
+
+
+def test_an_amount_is_checked_by_its_meaning(monkeypatch):
+    """Regression: $5.000 from a discarded cash row never validates "you still owe $5.000"."""
+    monkeypatch.setattr(brain, "_turn", brain._Turn())          # no sentence handed out yet
+    order = _order_of(("b_caserita", 1))
+    payments.register_cash(order["id"], 5000)
+    payments.register_cash(order["id"], 2400)
+    payments.discard_cash(order["id"], _cash_ids(order["id"])[0], "Error")
+    pay = payments.current(order["id"])
+    sentence = brain.payment_sentence(pay)
+    assert sentence == (f"Ya pagó {fmt(2400)} en efectivo. Quedan {fmt(CASERITA - 2400)} por "
+                        "pagar en efectivo al recibir.")
+    assert brain._problems("Todavía le faltan $5.000.", sentence, pay, PHONE)[1] is True
+    assert brain._problems(f"Todavía le faltan $5.000. {sentence}", sentence, pay, PHONE)[1]
+    assert brain._problems(
+        f"Los {fmt(5000)} que el local había registrado se anularon. {sentence}",
+        sentence, pay, PHONE) == (False, False)
+    assert brain._problems(f"Le faltan {fmt(CASERITA - 2400)}. {sentence}",
+                           sentence, pay, PHONE) == (False, False)
+
+    db.reset()
+    g29 = _g29_order()
+    brain._run_tool(PHONE, "add_item", {"item_id": "d_gaseosa_personal"})
+    pay = payments.current(g29["id"])
+    sentence = brain.payment_sentence(pay)
+    assert brain._problems(f"Faltan {fmt(10000)}. {sentence}", sentence, pay, PHONE)[1] is True
+    assert brain._problems(f"Le quedan {fmt(10000)} por transferir. {sentence}",
+                           sentence, pay, PHONE) == (False, False)
+
+
+def test_a_balance_question_after_a_partial_discard(monkeypatch, chat):
+    order = _order_of(("b_caserita", 1))
+    payments.register_cash(order["id"], 5000)
+    payments.register_cash(order["id"], 2400)
+    payments.discard_cash(order["id"], _cash_ids(order["id"])[0], "Error")
+    sentence = brain.payment_sentence_for(PHONE)
+    good = f"Los {fmt(5000)} que el local había registrado se anularon. {sentence}"
+    calls = _scripted(monkeypatch, _use("order_status"), _say("Todavía le faltan $5.000."),
+                      _say(good))
+    assert _customer_says("¿Cuánto me falta?") == good
+    assert calls[0]["tool_choice"] == {"type": "tool", "name": "order_status"}   # fresh read
+    assert "Tu borrador anterior" in calls[2]["system"]
+
+
+def test_an_amount_from_older_chat_is_corrected(monkeypatch, chat):
+    _transfer_order()
+    sentence = brain.payment_sentence_for(PHONE)
+    _scripted(monkeypatch, _use("order_status"), _say(f"Debe $12.345. {sentence}"),
+              _say(sentence))
+    assert _customer_says("¿Cuánto debo?") == sentence
+
+
+def test_the_backstop_replaces_an_unchecked_payment_claim(monkeypatch, chat):
+    _transfer_order()
+    sentence = brain.payment_sentence_for(PHONE)
+    calls = _scripted(monkeypatch, _say("¡Con gusto! Su pedido ya está pagado."),
+                      _use("order_status"), _say(sentence))
+    reply = _customer_says("Muchas gracias")
+    assert reply == sentence
+    assert "tool_choice" not in calls[0]                         # not a payment question
+    assert calls[1]["tool_choice"] == {"type": "tool", "name": "order_status"}
+    assert calls[2]["tool_choice"] == {"type": "none"}
+
+
+def test_a_claim_after_confirm_order_is_still_checked(monkeypatch, chat):
+    _pickup_order()                                              # waiting for the "sí"
+    final = f"Su pedido quedó confirmado. Falta por pagar {fmt(ESPECIAL)}."
+    calls = _scripted(monkeypatch, _use("confirm_order"),
+                      _say("¡Listo! Su pedido quedó confirmado y ya está pagado."),
+                      _use("order_status", block_id="t2"), _say(final))
+    assert _customer_says("Sí, confirmo") == final
+    assert calls[2]["tool_choice"] == {"type": "tool", "name": "order_status"}
+
+
+def test_choose_payment_in_a_payment_question_is_checked(monkeypatch, chat):
+    _confirmed_order()
+    before = brain.payment_sentence_for(PHONE)                   # "Falta por pagar $29.900."
+    after = f"Quedan {fmt(ESPECIAL)} por transferir." + TRANSFER_TAIL
+    calls = _scripted(monkeypatch, _use("order_status"),
+                      _use("choose_payment", {"method": "TRANSFER"}, "t2"), _say(f"Listo. {after}"))
+    reply = _customer_says("Lo pago por transferencia, ¿cuánto sería?")
+    assert reply == f"Listo. {after}"
+    assert reply.count("Cuando transfiera") == 1
+    assert len(calls) == 3                                       # the tool's sentence is reused
+
+    db.reset()
+    brain.forget(PHONE)
+    _confirmed_order()
+    _scripted(monkeypatch, _use("order_status"),
+              _use("choose_payment", {"method": "TRANSFER"}, "t2"),
+              _say(f"{before} {after}"), _say(after))           # an earlier, stale sentence
+    assert _customer_says("Lo pago por transferencia, ¿cuánto sería?") == after
+
+    db.reset()
+    brain.forget(PHONE)
+    _confirmed_order()
+    _scripted(monkeypatch, _use("order_status"),
+              _use("choose_payment", {"method": "TRANSFER"}, "t2"),
+              _say(f"{after} Ya quedó pagado."), _say(after))    # a contradiction
+    assert _customer_says("Lo pago por transferencia, ¿cuánto sería?") == after
+
+
+def test_an_edit_after_order_status_needs_the_newer_sentence(monkeypatch, chat):
+    _transfer_order()
+    earlier = brain.payment_sentence_for(PHONE)
+    calls = _scripted(monkeypatch, _use("order_status"),
+                      _use("add_item", {"item_id": "d_gaseosa_personal"}, "t2"),
+                      _say(earlier), _say(_added_gaseosa_sentence()))
+    reply = _customer_says("¿Cuánto me falta? Y agrégueme una gaseosa personal")
+    assert reply == _added_gaseosa_sentence()
+    assert "Tu borrador anterior" in calls[3]["system"]
+
+
+def test_a_failed_payment_read_never_sends_an_amount(monkeypatch, chat):
+    _transfer_order()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(brain, "_live_payment", lambda phone: (None, True))
+    monkeypatch.setattr(brain, "payment_sentence", broken)
+    _scripted(monkeypatch, _use("order_status"), _say(f"Le faltan {fmt(ESPECIAL)} por transferir."))
+    assert _customer_says("¿Cuánto me falta?") == brain.PAYMENT_UNAVAILABLE
+
+    brain.forget(PHONE)
+    _scripted(monkeypatch, _use("order_status"), _say("Déjeme revisar."))
+    assert _customer_says("¿Cuánto me falta?") == f"Déjeme revisar.\n\n{brain.PAYMENT_UNAVAILABLE}"
+
+
+@pytest.mark.parametrize("stop", ["hand_over", "customer_cancels"])
+def test_payment_of_a_delivered_or_cancelled_order_is_not_verified(monkeypatch, chat, stop):
+    if stop == "hand_over":
+        _completed_order()
+    else:
+        orders.apply_event(_confirmed_order()["id"], "customer_cancels")
+    calls = _scripted(monkeypatch, _use("order_status"), _say("Sí, ya está pagado."),
+                      _say(brain.PAYMENT_UNVERIFIED))
+    assert _customer_says("¿Ya quedó pago mi pedido?") == brain.PAYMENT_UNVERIFIED
+    assert calls[0]["tool_choice"] == {"type": "tool", "name": "order_status"}
+
+    brain.forget(PHONE)
+    _scripted(monkeypatch, _use("order_status"), _say("Sí, ya está pagado."), _say("Ya pagó todo."))
+    assert _customer_says("¿Ya quedó pago mi pedido?") == brain.PAYMENT_UNVERIFIED   # safe reply
+
+    brain.forget(PHONE)
+    _scripted(monkeypatch, _use("order_status"), _say("Déjeme ver."))
+    assert _customer_says("¿Ya quedó pago mi pedido?") == (
+        f"Déjeme ver.\n\n{brain.PAYMENT_UNVERIFIED}")
+
+
+def test_an_earlier_order_never_gets_the_live_orders_payment(monkeypatch, chat):
+    _completed_order()
+    _order_of(("b_caserita", 1))                                 # a new live order
+    live_sentence = brain.payment_sentence_for(PHONE)
+    _scripted(monkeypatch, _use("order_status"),
+              _say(f"Su pedido anterior: {live_sentence}"), _say(brain.PAYMENT_UNVERIFIED))
+    reply = _customer_says("¿Y el pedido anterior quedó pago?")
+    assert reply == brain.PAYMENT_UNVERIFIED
+    tool_result = brain._history[PHONE][2]["content"][0]["content"]
+    assert "Frase de pago" not in tool_result
+    assert "NO SE PUDO verificar el pago de ese pedido" in tool_result
+
+
+# -- ESTADO REAL, reports, schema, panel -----------------------------------------
+
+def test_real_state_names_discarded_cash_apart_from_the_cash_that_counts():
+    order = _order_of(("b_caserita", 1), method="CASH")
+    payments.register_cash(order["id"], 5000)
+    payments.register_cash(order["id"], 2400)
+    payments.discard_cash(order["id"], _cash_ids(order["id"])[0], "Error")
+    prompt = brain.system_prompt(PHONE)
+    assert _payment_line(prompt) == (
+        "- Pago del pedido más reciente: en efectivo al recibir; el local ya recibió una parte en "
+        "efectivo; el local anuló 1 registro de efectivo, que ya no cuenta como pago; no ha "
+        "enviado ningún comprobante; queda por pagar en efectivo al recibir; todavía falta por "
+        "pagar.")
+    block = _real_state_block(prompt)
+    assert "Nunca digas que se le devolvió dinero ni que no entregó el dinero" in block
+    assert "Nunca uses montos de mensajes anteriores" in block
+    assert "$" not in block
+
+
+def test_report_counts_what_really_came_in():
+    def kinds():
+        return {k["kind"]: (k["orders"], k["received"]) for k in reports.snapshot(1)["how_paid"]}
+
+    a = _transfer_order()
+    payments.register_cash(a["id"], ESPECIAL)                    # agreed transfer, paid in cash
+    b = _second_transfer_order()
+    payments.confirm_receipt(b["id"], _receipt(b["id"], ESPECIAL, "REP2-B")["receipt"]["id"])
+    c = _order_of(("b_especial", 1))                             # cash, then a confirmed transfer
+    payments.register_cash(c["id"], ESPECIAL)
+    red = _receipt(c["id"], ESPECIAL, "REP2-C")["receipt"]
+    payments.confirm_receipt(c["id"], red["id"], ESPECIAL)
+    d = _second_transfer_order()
+    _receipt(d["id"], ESPECIAL, "REP2-D")                        # waiting: does not count yet
+    e = _confirmed_order()
+    payments.register_cash(e["id"], 5000)
+    payments.discard_cash(e["id"], _cash_ids(e["id"])[0], "Error")
+
+    assert kinds() == {
+        "CASH": (1, ESPECIAL), "TRANSFER": (1, ESPECIAL),
+        "MIXED": (1, 2 * ESPECIAL),                              # not capped at the total
+        "NONE": (2, 0),
+    }
+    assert reports.snapshot(1)["confirmed_overpayments"] == [{
+        "code": orders.get(c["id"])["code"], "total": ESPECIAL, "received": 2 * ESPECIAL,
+        "surplus": ESPECIAL,
+    }]
+
+
+def test_report_never_turns_a_waiting_receipt_into_a_confirmed_overpayment():
+    order = _transfer_order()
+    _receipt(order["id"], ESPECIAL, "WAITOVER-1")                # clean, nobody confirmed it
+    payments.register_cash(order["id"], ESPECIAL)
+    assert payments.current(order["id"])["overpayment_amount"] == ESPECIAL   # card: "Sobrepago"
+    snapshot = reports.snapshot(1)
+    assert snapshot["confirmed_overpayments"] == []
+    assert {k["kind"]: k["orders"] for k in snapshot["how_paid"]}["CASH"] == 1
+
+
+def test_report_lists_rejected_orders_with_money_apart():
+    order = _order_of(("d_gaseosa_mini", 1), method="CASH")
+    payments.register_cash(order["id"], MINI)
+    orders.apply_event(order["id"], "staff_rejects", "Se acabó")
+    snapshot = reports.snapshot(1)
+    assert all(k["orders"] == 0 for k in snapshot["how_paid"])
+    assert snapshot["stopped_with_payments"] == [{
+        "code": order["code"], "state": "REJECTED", "total": MINI, "received": MINI,
+        "cash": MINI, "confirmed": 0,
+    }]
+    html = (Path(__file__).resolve().parent.parent / "static" / "reports.html").read_text(
+        encoding="utf-8")
+    for text in ("Dinero recibido", "Sin pago registrado", "Pagos de más confirmados",
+                 "Pagos de pedidos cancelados/rechazados", "Pagos registrados",
+                 "este reporte no registra devoluciones"):
+        assert text in html
+
+
+def test_cash_table_and_method_column_reach_an_old_database():
+    db.run("DROP TABLE cash_payments")
+    db.run("ALTER TABLE payments DROP COLUMN method_from_cash")
+    db.init()
+    assert {row["name"] for row in db.q("PRAGMA table_info(payments)")} >= {"method_from_cash"}
+    assert db.q1("SELECT name FROM sqlite_master WHERE name='cash_payments'") is not None
+
+
+def test_reset_wipes_cash_rows():
+    order = _confirmed_order()
+    payments.register_cash(order["id"], 5000)
+    db.reset()
+    assert db.q1("SELECT COUNT(*) AS n FROM cash_payments")["n"] == 0
+
+
+def test_kitchen_card_has_the_pagos_block():
+    html = (Path(__file__).resolve().parent.parent / "static" / "kitchen.html").read_text(
+        encoding="utf-8")
+    assert "<b>Pagos</b>" in html
+    assert "<b>Comprobantes</b>" not in html
+    assert "Efectivo recibido" in html
+    assert "/cash/${cashId}/discard" in html
+    assert "¿Descartar este efectivo?" in html
+    assert "El cliente no recibe ningún mensaje." in html
+    assert ">Descartar</button>" not in html                   # the X replaced the text button
+    assert "filter(r => r.status !== 'DISCARDED')" in html      # discarded rows leave the card
