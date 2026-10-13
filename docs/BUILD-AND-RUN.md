@@ -40,7 +40,8 @@ The virtualenv folder is `venv/` (ignored by git). If PowerShell blocks activati
 | Variable | Meaning |
 |---|---|
 | `ANTHROPIC_API_KEY` | Required. Missing → the startup banner says "FALTA" and the bot answers "sistema en mantenimiento" |
-| `ANTHROPIC_MODEL` | Optional. Empty → the first available sonnet, then opus, then haiku |
+| `ANTHROPIC_MODEL` | The conversation model (`claude-haiku-5-5`). It must accept a forced `tool_choice`: Sonnet 5.5 and Opus 5.5 don't, and payment questions fail with a 400 (G34). Empty → the first available haiku, then sonnet, then opus |
+| `ANTHROPIC_PROOF_MODEL` | The model that reads receipt images (`claude-sonnet-5-5`). Empty → the same as `ANTHROPIC_MODEL` |
 | `WHATSAPP_TOKEN` | Empty → **FAKE mode**: nothing goes to WhatsApp, replies are only stored for the simulator |
 | `WHATSAPP_PHONE_NUMBER_ID` | The sending number's id in Meta (live mode needs both this and the token) |
 | `WHATSAPP_APP_SECRET` | Checks Meta's webhook signature. Empty → the check is skipped |
@@ -55,7 +56,7 @@ The virtualenv folder is `venv/` (ignored by git). If PowerShell blocks activati
 ```powershell
 uvicorn app.main:app --reload --port 8000
 
-python -m pytest tests -q                                    # all tests (263 pass, 1 xfail)
+python -m pytest tests -q                                    # all tests (310 pass, 1 xfail)
 python -m pytest tests -q -k wrong_amount                    # by name
 python -m pytest tests/test_flow.py::test_happy_path_pickup  # one test
 ```
@@ -90,7 +91,7 @@ Pages: `http://localhost:8000/simulator`, `/kitchen` (also `/`), `/reports`.
   check, "Cómo pagaron").
 - Not covered: what the real AI decides (tool choice, wording). The Notion checklists and
   `TEST.md` test that by hand.
-- Result on 2026-10-07: 306 passed, 1 xfailed (the G16 expected failure in
+- Result on 2026-10-13: 310 passed, 1 xfailed (the G16 expected failure in
   `tests/test_review_bugs.py`), 3 deprecation warnings (two from `on_event`, one from
   Starlette's test client).
 

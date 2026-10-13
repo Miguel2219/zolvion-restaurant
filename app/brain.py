@@ -18,11 +18,14 @@ from .money import fmt
 
 _client = None
 _model = None
+_proof_model = None
 _lock = threading.Lock()
 _history: dict[str, list] = {}
 HISTORY_TURNS = 24
 
-PREFERRED = ("sonnet", "opus", "haiku")
+# Haiku first: Sonnet 5.5 and Opus 5.5 refuse the forced order_status call that payment
+# questions make (a 400 on every payment message), and Haiku 5.5 accepts it.
+PREFERRED = ("haiku", "sonnet", "opus")
 
 
 class NotConfigured(RuntimeError):
@@ -61,6 +64,26 @@ def model() -> str:
                 return _model
     _model = available[0]
     return _model
+
+
+def proof_model() -> str:
+    """The model that reads receipt images (extract_proof): ANTHROPIC_PROOF_MODEL if
+    set, otherwise the conversation model. A misread amount, date or account turns a
+    good receipt red, so this one can be stronger than the conversation model."""
+    global _proof_model
+    if _proof_model:
+        return _proof_model
+    _proof_model = os.environ.get("ANTHROPIC_PROOF_MODEL", "").strip() or model()
+    return _proof_model
+
+
+def model_names() -> tuple[str, str]:
+    """For the startup banner, without asking the API: the conversation model and the
+    receipt model, as resolved so far or as .env says."""
+    chat = _model or os.environ.get("ANTHROPIC_MODEL", "").strip() or "automático"
+    proof = (_proof_model or os.environ.get("ANTHROPIC_PROOF_MODEL", "").strip()
+             or f"{chat} (igual que conversación)")
+    return chat, proof
 
 
 SYSTEM = """{persona}
@@ -1489,7 +1512,7 @@ trabajo. Sólo lee lo que dice la imagen."""
 def extract_proof(image_block: dict) -> dict:
     """image_block is an Anthropic image content block. Returns the raw fields."""
     response = client().messages.create(
-        model=model(),
+        model=proof_model(),
         max_tokens=512,
         system=PROOF_SYSTEM,
         messages=[{

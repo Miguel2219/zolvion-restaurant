@@ -36,7 +36,9 @@ def _iso(minutes_ago: float = 0) -> str:
 
 
 @pytest.fixture(autouse=True)
-def clean():
+def clean(monkeypatch):
+    # A real extract_proof with no proof model set would ask the API for its models.
+    monkeypatch.setattr(brain, "_proof_model", "test-model")
     db.init()
     db.reset()
     yield
@@ -3357,3 +3359,69 @@ def test_kitchen_card_has_the_pagos_block():
     assert "El cliente no recibe ningún mensaje." in html
     assert ">Descartar</button>" not in html                   # the X replaced the text button
     assert "filter(r => r.status !== 'DISCARDED')" in html      # discarded rows leave the card
+
+
+# ---- two models: conversation and receipts (D1-A) ----------------------------
+
+PROOF_IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "x"}}
+
+
+def _model_recorder(seen):
+    """A fake client that records which model each call asked for."""
+    class FakeMessages:
+        def create(self, **kwargs):
+            seen.append(kwargs["model"])
+            text = '{"amount": 47300, "reference": "M-1"}' \
+                if kwargs.get("system") == brain.PROOF_SYSTEM else "Listo."
+            return types.SimpleNamespace(
+                stop_reason="end_turn", content=[types.SimpleNamespace(type="text", text=text)])
+    return types.SimpleNamespace(messages=FakeMessages())
+
+
+def _two_models(monkeypatch, chat, proof):
+    monkeypatch.setenv("ANTHROPIC_MODEL", chat)
+    monkeypatch.setenv("ANTHROPIC_PROOF_MODEL", proof)
+    monkeypatch.setattr(brain, "_model", None)
+    monkeypatch.setattr(brain, "_proof_model", None)
+    seen = []
+    fake = _model_recorder(seen)
+    monkeypatch.setattr(brain, "client", lambda: fake)
+    return seen
+
+
+def test_conversation_and_receipts_use_their_own_models(monkeypatch):
+    seen = _two_models(monkeypatch, "chat-model", "proof-model")
+    brain.forget(PHONE)
+    try:
+        brain.reply(PHONE, "hola")
+    finally:
+        brain.forget(PHONE)
+    assert brain.extract_proof(PROOF_IMAGE)["amount"] == 47300
+    assert seen == ["chat-model", "proof-model"]
+
+
+def test_receipts_use_the_conversation_model_when_no_proof_model_is_set(monkeypatch):
+    seen = _two_models(monkeypatch, "chat-model", "")
+    assert brain.extract_proof(PROOF_IMAGE)["amount"] == 47300
+    assert seen == ["chat-model"]
+
+
+def test_startup_banner_names_both_models(monkeypatch):
+    _two_models(monkeypatch, "chat-model", "proof-model")
+    assert brain.model_names() == ("chat-model", "proof-model")
+    monkeypatch.setenv("ANTHROPIC_PROOF_MODEL", "")
+    assert brain.model_names() == ("chat-model", "chat-model (igual que conversación)")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "")
+    assert brain.model_names() == ("automático", "automático (igual que conversación)")
+
+
+def test_an_empty_chat_model_picks_haiku_first(monkeypatch):
+    """Sonnet 5.5 and Opus 5.5 refuse the forced order_status call (a 400 on every payment
+    message), so with ANTHROPIC_MODEL empty the automatic choice starts with Haiku."""
+    monkeypatch.setenv("ANTHROPIC_MODEL", "")
+    monkeypatch.setattr(brain, "_model", None)
+    ids = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+    listing = types.SimpleNamespace(data=[types.SimpleNamespace(id=i) for i in ids])
+    fake = types.SimpleNamespace(models=types.SimpleNamespace(list=lambda limit: listing))
+    monkeypatch.setattr(brain, "client", lambda: fake)
+    assert brain.model() == "claude-haiku-5-5"

@@ -1,6 +1,6 @@
 # Known gaps
 
-What stands between the code at the snapshot (`README_1.md`, checked 2026-10-07 after Task
+What stands between the code at the snapshot (`README_1.md`, checked 2026-10-13 after Task
 C2 Part 2) and an MVP a restaurant can run every day. Every item was observed in the code,
 the repo docs or the Notion checklists.
 
@@ -40,6 +40,7 @@ Numbers are never reused: a closed gap moves to §7 and keeps its number.
 | G14 | Outbound messages are not retried and nobody is alerted on failure | A failed "su pedido va en camino" is only visible as `FAILED` in the database | `wa.send_text` |
 | G15 | Voice notes, stickers and locations now reach the bot as a note (`CURRENT-STATE.md` R5), but a voice note is not transcribed: the bot can only ask the customer to write it | Real customers send voice notes | `wa.parse_webhook`, `main._note_for` |
 | G16 | Order codes are 4 random digits, retried until unused, and never freed. An expected-failure test exists: `test_g16_order_code_loop_is_bounded` | Collisions slow down creation as orders pile up; after 10 000 orders the loop never ends | `orders._code` |
+| G34 | Payment messages force a fresh `order_status` call (`tool_choice` type `tool`), which Sonnet 5.5, Opus 5.5 and Fable 5.1 refuse with a 400. The chat model must be Haiku 5.5; an empty `ANTHROPIC_MODEL` picks Haiku first. Miguel plans to fix it before real use: code reads the order itself, so any model works | On a refusing model every payment message gets "Perdón, se me cruzaron los cables", and a newer chat model can't be used | `brain._payment_question`, `brain._answer_again` |
 
 ## 4. Business behaviour
 

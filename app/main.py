@@ -31,10 +31,13 @@ def _startup_check() -> None:
     """Say out loud what is and is not configured, before the first message
     arrives instead of after it fails."""
     key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+    chat_model, proof_model = brain.model_names()
     lines = [
         "",
         "  " + CATALOG.business["name"] + "  —  demo",
         f"  Anthropic key : {'OK' if key else 'FALTA  -> revisa .env y reinicia'}",
+        f"  Conversación  : {chat_model}",
+        f"  Comprobantes  : {proof_model}",
         f"  WhatsApp      : {'conectado' if wa.live() else 'modo simulador'}",
         f"  Firma webhook : {'verificando' if wa.app_secret() else 'sin APP_SECRET (no verifica)'}",
         "",

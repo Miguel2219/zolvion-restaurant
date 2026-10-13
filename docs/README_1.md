@@ -3,10 +3,10 @@
 Start here. This file says what the system is, why it exists, and which document answers
 which question.
 
-Snapshot these docs describe: code last changed **2026-10-07** by Task C2 Part 2, the
+Snapshot these docs describe: code last changed **2026-10-13** after Task C2 Part 2, the
 "Pagos" block (local folder `C:\Users\PC\Desktop\zolvion-demo`, git branch
-`bugfix/notion-bugs`), with 306 automated tests passing and 1 expected failure (G16);
-Notion task checklists A, B, C and C2 Part 1 all ✅, C2 Part 2 not yet run by hand.
+`feature/c2-part2-payments`), with 310 automated tests passing and 1 expected failure (G16);
+Notion task checklists A, B, C, C2 Part 1 and C2 Part 2 all ✅.
 Anything newer is not reflected here until the docs are updated.
 
 ---

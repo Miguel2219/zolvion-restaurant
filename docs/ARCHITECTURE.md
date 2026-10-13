@@ -132,7 +132,10 @@ and drops the old `payments_reference_unique` index.
    on every model call (live orders' states and the newest order's payment in words, no
    amounts, no codes). What the bot says about money is a code-built sentence it copies;
    `_finish_turn` checks every reply that speaks about payment (`payments.md` §7). Model: `ANTHROPIC_MODEL`, or the first available id containing
-   `sonnet`, then `opus`, then `haiku`. Each tool call is printed to the console.
+   `haiku`, then `sonnet`, then `opus`. It must accept a forced `tool_choice` (payment
+   questions force `order_status`): Haiku 5.5 does, Sonnet 5.5 and Opus 5.5 don't (G34).
+   Each tool call is printed to the console.
 2. **Receipt reading** (`brain.extract_proof`): raw JSON only (amount, destination and
    origin account and holder, reference, date, `date_iso`, provider). It never judges
-   the payment; `payments.md` covers the checks.
+   the payment; `payments.md` covers the checks. Model: `ANTHROPIC_PROOF_MODEL`, or the
+   conversation model when empty.

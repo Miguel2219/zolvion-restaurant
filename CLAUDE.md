@@ -30,7 +30,7 @@ No linter or formatter is configured.
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
-python -m pytest tests -q                                   # 306 pass, 1 xfail (G16)
+python -m pytest tests -q                                   # 310 pass, 1 xfail (G16)
 python -m pytest tests -q -k wrong_amount                   # by name
 python -m pytest tests/test_flow.py::test_happy_path_pickup # one test
 ```
@@ -173,9 +173,9 @@ from the staff's reason (`_stop_message`, template fallback). `COMPLETED` and cu
   or an amount that doesn't match its clause's meaning gets one more answer, then a code-built
   reply (`_Turn.actions` + sentence). Delivered/cancelled or "el pedido anterior" →
   «No pude verificar el pago de ese pedido.» Details: `docs/payments.md` §7.
-- Each tool call prints `[bot ...1234] <tool> <args> -> <result>` (cut at 160 chars), the
-  only record of what the model called.
-- `ANTHROPIC_MODEL` empty → first id from `models.list()` matching sonnet, opus, haiku.
+- Each tool call prints `[bot ...1234] <tool> <args> -> <result>` (160 chars): the only record.
+- `ANTHROPIC_MODEL` (chat; empty → first `models.list()` id with haiku, sonnet, opus) must accept a
+  forced `tool_choice` (Sonnet/Opus 5.5 400s). `ANTHROPIC_PROOF_MODEL` (receipts) empty → the chat model.
 
 ## Adding or changing a tool
 

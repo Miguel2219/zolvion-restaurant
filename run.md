@@ -31,9 +31,10 @@ copy .env.example .env
 notepad .env
 ```
 
-Put `ANTHROPIC_API_KEY=sk-ant-...` and save. Leave `ANTHROPIC_MODEL` empty: the app
-asks the API which models exist and picks one. Leave every `WHATSAPP_*` line empty
-for now. Empty = offline mode.
+Put `ANTHROPIC_API_KEY=sk-ant-...` and save. Keep `ANTHROPIC_MODEL=claude-haiku-5-5` and
+`ANTHROPIC_PROOF_MODEL=claude-sonnet-5-5` as they come: Sonnet 5.5 and Opus 5.5 can't be the
+chat model, they fail on payment questions. Leave every `WHATSAPP_*` line empty for now.
+Empty = offline mode.
 
 ## Step 3 — Start it
 
@@ -41,8 +42,9 @@ for now. Empty = offline mode.
 uvicorn app.main:app --reload --port 8000
 ```
 
-Leave this window open. The banner says whether the key is there, whether WhatsApp
-is connected and whether the webhook signature is checked.
+Leave this window open. The banner says whether the key is there, which models answer
+the chat and read receipts, whether WhatsApp is connected and whether the webhook
+signature is checked.
 
 ## Step 4 — Test offline first (10 min) — do not skip
 
@@ -59,7 +61,7 @@ is connected and whether the webhook signature is checked.
 5. Aceptar → Listo → Sale a domicilio → Entregado: the messages appear in the simulator
 6. Reports → sales, top item, payment split
 
-Then `python -m pytest tests -q` → **263 passed, 1 xfailed**. Full checks: `TEST.md`.
+Then `python -m pytest tests -q` → **310 passed, 1 xfailed**. Full checks: `TEST.md`.
 **If anything fails here, fix it now.** Do not move on to WhatsApp.
 
 ## Step 5 — Connect WhatsApp Cloud API (15 min)

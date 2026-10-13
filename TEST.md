@@ -189,8 +189,8 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
 
 ## Part D — automated tests
 
-`python -m pytest tests -q` → **306 passed, 1 xfailed** (Task B ended with 147, Task C
-with 210, C2 Part 1 with 263; the xfail is G16, out of scope).
+`python -m pytest tests -q` → **310 passed, 1 xfailed** (Task B ended with 147, Task C
+with 210, C2 Part 1 with 263, C2 Part 2 with 306; the xfail is G16, out of scope).
 
 ## Before the demo
 
