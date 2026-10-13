@@ -68,9 +68,11 @@
   .receipts{margin-bottom:9px;font-size:13px}
   .receipts>b{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}
   .rcpt{border-top:1px solid var(--line);padding:7px 0}
-  .rcpt.discarded{opacity:.55}
   .rcpt .rtop{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px}
   .eye{background:transparent;border:1px solid var(--line);border-radius:8px;color:var(--ink);cursor:pointer;padding:1px 7px}
+  .xbtn{margin-left:auto;background:transparent;border:1px solid var(--line);border-radius:8px;
+        color:var(--muted);cursor:pointer;padding:1px 8px;font-size:13px}
+  .xbtn:hover{color:var(--bad);border-color:rgba(240,80,58,.55)}
   .photo{max-width:min(92vw,560px);max-height:88vh;border-radius:11px;box-shadow:0 10px 40px rgba(0,0,0,.5)}
   .empty{color:var(--muted);font-size:13px;padding:8px 2px}
   .banner{margin:0 16px;padding:10px 14px;border-radius:11px;font-size:13px;
@@ -82,7 +84,6 @@
          padding:18px;width:min(440px,100%);box-shadow:0 10px 40px rgba(0,0,0,.5)}
   .modal h3{margin:0 0 6px;font-size:16px}
   .modal p{margin:0 0 12px;color:var(--muted);font-size:13px}
-  .modal .warnline{color:var(--warn);font-size:12.5px;margin:-6px 0 10px}
   .modal textarea{width:100%;min-height:84px;background:#0d1117;color:var(--ink);
        border:1px solid var(--line);border-radius:9px;padding:10px;font:inherit;font-size:14px;
        resize:vertical}
@@ -138,13 +139,13 @@ const NEEDS_REASON = {
 const METODO = {CASH:'Efectivo', TRANSFER:'Transferencia', MIXED:'Mixto', UNSPECIFIED:'Sin especificar'};
 // Whether a RECEIPT checks out. Separate from whether the ORDER is paid - the
 // money tag below answers that. The map serves each receipt row and the derived
-// order-level tag (the worst receipt wins; discarded ones are ignored).
+// order-level tag (the worst receipt wins; discarded ones are ignored). A discarded
+// receipt or cash row is not on the card at all.
 const COMPROBANTE = {
   PENDING:        ['Sin comprobante', ''],
   PROOF_RECEIVED: ['Comprobante recibido', 'warn'],
   FLAGGED:        ['Comprobante por revisar', 'bad'],
   CONFIRMED:      ['Comprobante confirmado', 'ok'],
-  DISCARDED:      ['Descartado', ''],
 };
 function moneyTag(pay){
   if (!pay.paid) return ['Sin pagar', 'bad'];
@@ -185,8 +186,8 @@ function toast(msg){
 // the focus and onConfirm receives ''. numeric: a text box with the numeric keypad, not
 // an input of type number: that one reads "26.000" as 26 and its arrows round a typed
 // decimal. validate: value -> error text or ''; a text keeps the dialog open and posts
-// nothing. warning: an amber line under the help text, only rendered when non-empty.
-function modal({title, help, warning, placeholder, confirmText, required, numeric, value, validate, noField, onConfirm}){
+// nothing.
+function modal({title, help, placeholder, confirmText, required, numeric, value, validate, noField, onConfirm}){
   const back = document.createElement('div');
   back.className = 'back';
   const field = noField ? ''
@@ -195,7 +196,6 @@ function modal({title, help, warning, placeholder, confirmText, required, numeri
     : `<textarea id="mtext" placeholder="${esc(placeholder||'')}"></textarea>`;
   back.innerHTML = `<div class="modal">
       <h3>${esc(title)}</h3><p>${esc(help)}</p>
-      ${warning ? `<p class="warnline">${esc(warning)}</p>` : ''}
       ${field}
       <div class="err" id="merr"></div>
       <div class="row"><button class="ghost" id="mno">Volver</button>
@@ -231,19 +231,18 @@ function modal({title, help, warning, placeholder, confirmText, required, numeri
 }
 
 // One payment receipt: its own status, flags, photo and buttons. Only a receipt
-// that still waits for a person can be confirmed or discarded.
+// that still waits for a person can be confirmed or discarded (the X).
 function receiptRow(orderId, r){
   const [label, cls] = COMPROBANTE[r.status] || [r.status, ''];
   const waiting = r.status === 'PROOF_RECEIVED' || r.status === 'FLAGGED';
   const flagText = (r.flags || []).map(f => esc(f)).join('<br>');
   const flags = !flagText ? ''
     : waiting ? `<div class="flags"><b>⚠ Comprobante con inconsistencias</b>${flagText}</div>`
-    : r.status === 'CONFIRMED' ? `<div class="flags reviewed"><b>✓ Revisado</b>${flagText}</div>`
-    : `<div class="flags reviewed">${flagText}</div>`;
+    : `<div class="flags reviewed"><b>✓ Revisado</b>${flagText}</div>`;
   // Only a clean number is safe to inline into the onclick attribute below - an
   // amount the OCR could not read falls back to null, and staff types it.
   const prefill = Number.isInteger(r.amount) ? r.amount : 'null';
-  return `<div class="rcpt ${r.status === 'DISCARDED' ? 'discarded' : ''}">
+  return `<div class="rcpt">
     <div class="rtop">
       <span>${hhmm(r.received_at)}</span>
       <b>${r.amount == null ? 'monto ilegible' : money(r.amount)}</b>
@@ -251,17 +250,42 @@ function receiptRow(orderId, r){
       ${r.has_photo
         ? `<button class="eye" title="Ver comprobante" onclick="showPhoto(${r.id})">👁</button>`
         : '<span class="tag">sin foto</span>'}
+      ${waiting
+        ? `<button class="xbtn" title="Descartar" aria-label="Descartar comprobante" onclick="discardReceipt(${orderId}, ${r.id})">✕</button>` : ''}
     </div>
     ${(r.notes || []).map(n => `<span class="tag">${esc(n)}</span>`).join('')}
     ${flags}
-    ${r.status === 'DISCARDED' && r.discard_reason
-      ? `<div class="flags reviewed">Motivo: ${esc(r.discard_reason)}</div>` : ''}
     ${waiting
       ? `<div class="acts">
            <button class="ghost" onclick="confirmReceipt(${orderId}, ${r.id}, ${prefill})">Confirmar</button>
-           <button class="ghost" onclick="discardReceipt(${orderId}, ${r.id})">Descartar</button>
          </div>` : ''}
   </div>`;
+}
+
+// One cash registration. The person who registered it already holds the money, so
+// there is no Confirmar: only the X, for a registration made by mistake.
+function cashRow(orderId, c){
+  return `<div class="rcpt">
+    <div class="rtop">
+      <span>${hhmm(c.registered_at)}</span>
+      <b>${money(c.amount)}</b>
+      <span class="tag ok">Efectivo recibido</span>
+      <button class="xbtn" title="Descartar" aria-label="Descartar efectivo" onclick="discardCash(${orderId}, ${c.id})">✕</button>
+    </div>
+  </div>`;
+}
+
+// The "Pagos" block: receipts and cash registrations in one list, oldest first.
+// Discarded rows leave the card entirely.
+function paymentRows(orderId, pay){
+  const rows = [
+    ...(pay.receipts || []).filter(r => r.status !== 'DISCARDED')
+      .map(r => [r.received_at, receiptRow(orderId, r)]),
+    ...(pay.cash || []).filter(c => c.status === 'RECEIVED')
+      .map(c => [c.registered_at, cashRow(orderId, c)]),
+  ];
+  rows.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return rows.map(r => r[1]).join('');
 }
 
 function card(o){
@@ -280,7 +304,7 @@ function card(o){
   // already covers some of it. `outstanding` only counts confirmed receipts.
   const cashOwed = ['CASH', 'MIXED'].includes(pay.method) && (pay.cash_due || 0) > 0;
   const cashPrefill = cashOwed ? pay.cash_due : pay.outstanding;
-  const receipts = pay.receipts || [];
+  const payRows = paymentRows(o.id, pay);
   const handoffs = o.handoffs || [];
   const confirmedAt = (o.transitions || []).find(t => t.to_state === 'CONFIRMED');
   const showUpdated = o.state === 'CONFIRMED' && o.edited_at && confirmedAt && o.edited_at > confirmedAt.at;
@@ -317,11 +341,11 @@ function card(o){
           <div class="acts" style="margin-top:7px">
             <button class="ghost" onclick="resolveHandoff(${o.id})">Ya lo atendí</button>
           </div></div>` : ''}
-    ${receipts.length
-      ? `<div class="receipts"><b>Comprobantes</b>${receipts.map(r => receiptRow(o.id, r)).join('')}</div>` : ''}
+    ${payRows
+      ? `<div class="receipts"><b>Pagos</b>${payRows}</div>` : ''}
     ${showRegisterCash
       ? `<div class="acts" style="margin-bottom:7px">
-           <button class="ghost" onclick="registerCash(${o.id}, ${cashPrefill}, ${pay.outstanding || 0}, ${pay.unconfirmed_amount || 0})">Registrar efectivo recibido</button>
+           <button class="ghost" onclick="registerCash(${o.id}, ${cashPrefill}, ${pay.outstanding || 0})">Registrar efectivo recibido</button>
          </div>` : ''}
     <div class="acts">${acts.map(([e,l,c]) =>
       `<button class="${c}" onclick="ev(${o.id},'${e}')">${l}</button>`).join('')}</div>
@@ -396,6 +420,23 @@ function discardReceipt(orderId, receiptId){
   });
 }
 
+// A cash registration made by mistake. Nobody is told: the customer never saw it.
+function discardCash(orderId, cashId){
+  modal({
+    title: '¿Descartar este efectivo?',
+    help: '¿Por qué se descarta este registro de efectivo? El cliente no recibe ningún mensaje.',
+    required: true, confirmText: 'Descartar',
+    placeholder: 'Ej: se registró en el pedido equivocado',
+    onConfirm: async reason => {
+      await api(`/api/orders/${orderId}/cash/${cashId}/discard`, {
+        method:'POST', headers:{'content-type':'application/json'},
+        body: JSON.stringify({reason}),
+      });
+      await draw();
+    },
+  });
+}
+
 // Appended to body, not to #board: the board is redrawn every 2 s and would take
 // the overlay with it.
 function showPhoto(id){
@@ -409,17 +450,13 @@ function showPhoto(id){
   document.body.appendChild(back);
 }
 
-function registerCash(id, prefill, outstanding, unconfirmed){
+// Cash registered by mistake is fixed with the X on its row, so there is no warning here.
+function registerCash(id, prefill, outstanding){
   const tooMuch = `El monto es mayor de lo que falta (${money(outstanding)}). `
     + 'Registre solo lo que falta; el cambio lo maneja el local.';
-  const waiting = unconfirmed > 0
-    ? `Hay comprobantes sin confirmar por ${money(unconfirmed)}. `
-      + 'Si el cliente pagó por transferencia, confírmelos antes de registrar efectivo.'
-    : '';
   modal({
     title: 'Registrar efectivo recibido',
     help: `Efectivo cobrado para este pedido, sin contar el cambio. Falta ${money(outstanding)}.`,
-    warning: waiting,
     numeric: true, required: true, value: prefill,
     validate: amount => {
       const n = parsePesos(amount);

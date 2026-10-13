@@ -31,10 +31,13 @@ def _startup_check() -> None:
     """Say out loud what is and is not configured, before the first message
     arrives instead of after it fails."""
     key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+    chat_model, proof_model = brain.model_names()
     lines = [
         "",
         "  " + CATALOG.business["name"] + "  —  demo",
         f"  Anthropic key : {'OK' if key else 'FALTA  -> revisa .env y reinicia'}",
+        f"  Conversación  : {chat_model}",
+        f"  Comprobantes  : {proof_model}",
         f"  WhatsApp      : {'conectado' if wa.live() else 'modo simulador'}",
         f"  Firma webhook : {'verificando' if wa.app_secret() else 'sin APP_SECRET (no verifica)'}",
         "",
@@ -145,22 +148,12 @@ DISCARD_TEMPLATE = (
 DISCARD_FORBIDDEN = ("confirmad", "cocina", "$")
 
 
-def _discard_message(order: dict, reason: str) -> str:
-    """Staff discarded a receipt (it is not a payment). Like _stop_message, the
-    model turns the staff's own reason into a short, kind message, and a fixed
-    template is used if the model fails - or if what it wrote trips the guard.
-    The template only quotes the staff's reason."""
-    template = DISCARD_TEMPLATE.format(reason=reason)
+def _guarded_reply(order: dict, instruction: str, template: str) -> str:
+    """A model-written message about a discarded receipt, sent only if it contains none
+    of DISCARD_FORBIDDEN nor the order code; the fixed template otherwise, or when the
+    model fails."""
     try:
-        text = brain.reply(order["phone"], (
-            "(Una persona del local descartó un comprobante que envió el cliente: no cuenta "
-            "como pago y ya no está en revisión. Motivo que escribió el personal: "
-            f"\"{reason}\". Escríbele al cliente un mensaje corto y amable explicándole el "
-            "motivo en palabras sencillas. No inventes un motivo distinto. No le digas que "
-            "algún pago está confirmado. No escribas montos ni el signo $. Si el ESTADO REAL "
-            "dice que todavía falta por transferir, puedes recordarle que falta, sin decir "
-            "cuánto. No le menciones ningún código de pedido.)"
-        ))
+        text = brain.reply(order["phone"], instruction)
     except Exception:  # noqa: BLE001 - the customer must be told either way
         traceback.print_exc()
         return template
@@ -169,6 +162,41 @@ def _discard_message(order: dict, reason: str) -> str:
         brain.correct_last_reply(order["phone"], template)   # the history says what was sent
         return template
     return text
+
+
+def _discard_message(order: dict, reason: str) -> str:
+    """Staff discarded a receipt (it is not a payment). Like _stop_message, the
+    model turns the staff's own reason into a short, kind message, and a fixed
+    template is used if the model fails - or if what it wrote trips the guard.
+    The template only quotes the staff's reason."""
+    return _guarded_reply(order, (
+        "(Una persona del local descartó un comprobante que envió el cliente: no cuenta "
+        "como pago y ya no está en revisión. Motivo que escribió el personal: "
+        f"\"{reason}\". Escríbele al cliente un mensaje corto y amable explicándole el "
+        "motivo en palabras sencillas. No inventes un motivo distinto. No le digas que "
+        "algún pago está confirmado. No escribas montos ni el signo $. Si el ESTADO REAL "
+        "dice que todavía falta por transferir, puedes recordarle que falta, sin decir "
+        "cuánto. No le menciones ningún código de pedido.)"
+    ), DISCARD_TEMPLATE.format(reason=reason))
+
+
+RESEND_DISCARDED_TEMPLATE = (
+    "Ese comprobante ya lo habíamos revisado y no lo tomamos como pago. Motivo: {reason}"
+)
+
+
+def _resent_discarded_message(order: dict, reason: str) -> str:
+    """The customer sent again a receipt staff had discarded (C2 Part 2, Gap 2): no new
+    row, and the staff's reason again instead of "ya lo teníamos". Same guard as the
+    discard message."""
+    return _guarded_reply(order, (
+        "(El cliente volvió a enviar un comprobante que el local ya había revisado y "
+        "descartado: no cuenta como pago. Motivo que escribió el personal: "
+        f"\"{reason}\". Dile en una o dos frases cortas y amables que ese comprobante ya lo "
+        "habíamos revisado y no lo tomamos como pago, y explícale el motivo en palabras "
+        "sencillas. No le digas que ya lo teníamos. No le digas que algún pago está "
+        "confirmado. No escribas montos ni el signo $. No le menciones ningún código de pedido.)"
+    ), RESEND_DISCARDED_TEMPLATE.format(reason=reason))
 
 
 def notify(order: dict, reason: str | None = None) -> None:
@@ -260,13 +288,16 @@ def _note_for(message: dict, image_failed: bool) -> str | None:
 
 
 def handle(
-    phone: str, text: str | None, image: dict | None, received_at: str | None = None
+    phone: str, text: str | None, image: dict | None, received_at: str | None = None,
+    customer: bool = True,
 ) -> str:
     """Returns the reply text. Caller decides how to deliver it.
 
     `received_at` is when the message actually arrived (both webhook handlers
     stamp inbound_messages with it) - the reference point for the proof's date
-    check, so the OCR call's own latency never eats into the customer's window."""
+    check, so the OCR call's own latency never eats into the customer's window.
+    `customer` is False when `text` is a note code wrote (_note_for), not the
+    customer's words: only the customer's words can be a payment question."""
     if image is None:
         if not (text or "").strip():
             # The API refuses an empty message; the model still has to answer something.
@@ -274,7 +305,8 @@ def handle(
                 "(El cliente envió un mensaje sin texto. Pregúntale con amabilidad en qué "
                 "le puedes ayudar.)"
             )
-        return brain.reply(phone, text)
+            customer = False
+        return brain.reply(phone, text, customer=customer)
 
     order = orders.latest_for(
         phone,
@@ -296,6 +328,8 @@ def handle(
         order["id"], extracted, photo=photo, received_at=received_at
     )                                               # code: the verdict
 
+    if record["resent"] and record.get("resent_discard_reason"):
+        return _resent_discarded_message(order, record["resent_discard_reason"])
     if record["resent"]:
         return brain.reply(phone, (
             "(El cliente volvió a enviar un comprobante que ya habíamos recibido para este "
@@ -312,33 +346,24 @@ def handle(
             "local lo va a revisar. No digas que el pago quedó recibido. "
             "No le menciones ningún código de pedido.)"
         ))
-    # The receipt may have settled the method the bot was still asking about: say
-    # so, or the bot goes back to its open question.
-    amount = fmt(receipt["amount"])
-    method = ""
-    if record["inferred"] and record["method"] == "TRANSFER":
-        method = (
-            " El comprobante cubre el total: el pago quedó por transferencia por el "
-            f"total ({amount})."
-        )
-    elif record["inferred"]:
-        method = (
-            " El comprobante cubre una parte: el pago quedó en parte y parte, "
-            f"{fmt(record['transfer_amount'])} por transferencia."
-        )
-    resto = (
-        f" Quedan {fmt(record['cash_due'])} por pagar en efectivo al recibir."
-        if record["method"] in ("MIXED", "CASH") and record["cash_due"] > 0 else ""
+    # What the customer is told about money is the code-built payment sentence, copied as
+    # it is (C2 Part 2): the model never picks which parts to name. When the receipt
+    # settled the method, the bot must not go back to asking it.
+    settled = (
+        " Con este comprobante quedó definida la forma de pago; no la vuelvas a preguntar."
+        if record["inferred"] else ""
     )
+    sentence = brain.payment_sentence_for(phone) or ""
     return brain.reply(phone, (
-        f"(Mensaje del sistema, no del cliente. El sistema recibió el comprobante por {amount} "
-        f"y los datos cuadran; ya quedó registrado.{method}{resto} Dile al cliente que recibimos "
-        f"su comprobante por {amount} y que una persona del local lo va a revisar"
-        + (", y cómo quedó el pago" if method or resto else "")
-        + ". NO le digas que ya está confirmado. No le preguntes cómo va a pagar ni cuánto "
-        "por transferencia o en efectivo: eso ya quedó definido. "
+        f"(Mensaje del sistema, no del cliente. El sistema recibió un comprobante por "
+        f"{fmt(receipt['amount'])} y los datos cuadran; quedó registrado y una persona del "
+        f"local lo va a revisar.{settled} Dile al cliente que recibimos su comprobante y que "
+        "una persona del local lo va a revisar, y copia tal cual, sin cambiar nada, esta frase "
+        f"sobre su pago: «{sentence}» NO le digas que ya está confirmado ni que su "
+        "transferencia está pagada. No le preguntes cómo va a pagar ni cuánto por "
+        "transferencia o en efectivo: eso ya quedó definido. "
         "No le menciones ningún código de pedido.)"
-    ))
+    ), with_payment=True, action=brain.RECEIPT_ACTION)
 
 
 # ---- WhatsApp webhook -----------------------------------------------
@@ -388,9 +413,10 @@ async def inbound(request: Request):
             else:
                 image_failed = True
         # Not text the bot can read: it gets a note instead of the (empty) text.
-        text = _note_for(message, image_failed) or message.get("text")
+        note = _note_for(message, image_failed)
+        text = note or message.get("text")
         try:
-            reply = handle(phone, text, image, received_at)
+            reply = handle(phone, text, image, received_at, customer=note is None)
         except brain.NotConfigured as exc:
             print(f"\n!! {exc}\n", flush=True)
             reply = "Perdón, el sistema está en mantenimiento. Intente en unos minutos."
@@ -604,6 +630,22 @@ async def register_cash(order_id: int, request: Request):
     body = await request.json()
     try:
         record = payments.register_cash(order_id, body.get("amount"))
+    except payments.PaymentError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return record
+
+
+@app.post("/api/orders/{order_id}/cash/{cash_id}/discard")
+async def discard_cash(order_id: int, cash_id: int, request: Request):
+    """A person discards one cash registration (the X) with a required reason. Nobody
+    is told: the customer never saw it registered."""
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    reason = body.get("reason") if isinstance(body, dict) else None
+    try:
+        record = payments.discard_cash(order_id, cash_id, reason)
     except payments.PaymentError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return record

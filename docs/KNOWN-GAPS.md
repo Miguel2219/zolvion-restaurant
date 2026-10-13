@@ -1,8 +1,8 @@
 # Known gaps
 
-What stands between the code at the snapshot (`README_1.md`, checked 2026-10-07) and an
-MVP a restaurant can run every day. Every item was observed in the code, the repo docs or
-the Notion checklists.
+What stands between the code at the snapshot (`README_1.md`, checked 2026-10-13 after Task
+C2 Part 2) and an MVP a restaurant can run every day. Every item was observed in the code,
+the repo docs or the Notion checklists.
 
 These are **observations, not decisions.** Which ones get fixed, in what order and how
 is Miguel's call; each becomes a lettered task only when he decides. Code defects found
@@ -15,7 +15,7 @@ Numbers are never reused: a closed gap moves to §7 and keeps its number.
 
 | # | Gap | Why it matters | Where |
 |---|---|---|---|
-| G1 | No login on the panel, reports, simulator or API | Anyone with the public URL can move orders, confirm or discard receipts, register cash, read phone numbers and chat as a fake customer | `main.py` routes |
+| G1 | No login on the panel, reports, simulator or API | Anyone with the public URL can move orders, confirm or discard receipts, register or discard cash, read phone numbers and chat as a fake customer | `main.py` routes |
 | G2 | `POST /api/reset` deletes every order, payment, receipt photo and conversation, with no login | One click (after a warning) or one request erases a restaurant's data | `main.reset`, `db.reset` |
 | G3 | Receipt photos are served by consecutive ids with no login | Anyone with the URL can open every customer's receipt (noted as a known gap in Task C) | `GET /api/receipts/{id}/photo` |
 | G4 | Webhook signature check is skipped when `WHATSAPP_APP_SECRET` is empty | Fake WhatsApp messages could be posted. It is set in the current `.env` | `wa.check_signature` |
@@ -40,6 +40,7 @@ Numbers are never reused: a closed gap moves to §7 and keeps its number.
 | G14 | Outbound messages are not retried and nobody is alerted on failure | A failed "su pedido va en camino" is only visible as `FAILED` in the database | `wa.send_text` |
 | G15 | Voice notes, stickers and locations now reach the bot as a note (`CURRENT-STATE.md` R5), but a voice note is not transcribed: the bot can only ask the customer to write it | Real customers send voice notes | `wa.parse_webhook`, `main._note_for` |
 | G16 | Order codes are 4 random digits, retried until unused, and never freed. An expected-failure test exists: `test_g16_order_code_loop_is_bounded` | Collisions slow down creation as orders pile up; after 10 000 orders the loop never ends | `orders._code` |
+| G34 | Payment messages force a fresh `order_status` call (`tool_choice` type `tool`), which Sonnet 5.5, Opus 5.5 and Fable 5.1 refuse with a 400. The chat model must be Haiku 5.5; an empty `ANTHROPIC_MODEL` picks Haiku first. Miguel plans to fix it before real use: code reads the order itself, so any model works | On a refusing model every payment message gets "Perdón, se me cruzaron los cables", and a newer chat model can't be used | `brain._payment_question`, `brain._answer_again` |
 
 ## 4. Business behaviour
 
@@ -54,18 +55,16 @@ Numbers are never reused: a closed gap moves to §7 and keeps its number.
 | G23 | A customer with no card who asks for a person reaches nobody | The notifications bell is planned as its own task | `brain` `request_handoff` |
 | G24 | Until Task D, staff contact the customer by hand; the bot keeps answering during a handoff | Two voices in one chat | `handoff.py` |
 | G25 | A receipt whose reference cannot be read can't be recognised as a resend; it is checked as a new receipt | Same screenshot twice may become two rows (Task C known gap) | `payments.check_proof` |
-| G29 | After an edit on a MIXED order with registered cash and a transfer still owed, the edit line names only the cash part, never the transfer still owed (decision A, 4 Oct; for C2 Part 2, "Pagos" block). In the 6 Oct manual run the bot named the transfer anyway, but the code does not tell it to | The customer may not hear that a transfer is still due | `brain._payment_line` |
-| G30 | After an edit on a TRANSFER order with part of it paid in cash, the edit line says nothing about the payment (listed as not fixed in the C2 Part 1 checklist) | The customer is not told after the change what is still owed by transfer | `brain._payment_line`, `payments.follow_total` |
 | G31 | The bot can read "doble queso adicional" as one queso (P-5135, first R4 run); "una caserita con doble queso" worked (P-3545) | Code prices exactly what the model adds; here the bot showed the price and asked, so the customer could catch it | `brain.SYSTEM`, `add_item` |
-| G32 | Cash registered on top of a clean receipt still waiting for a person: "Sobrepago" counts that receipt before anyone confirms the money arrived (`TEST.md` C7; listed as not fixed in the C2 Part 1 checklist) | The card can show a surplus for a transfer nobody has seen yet | `payments.current` (`overpayment_amount`) |
+| G32 | Cash registered on top of a clean receipt still waiting for a person: "Sobrepago" counts that receipt before anyone confirms the money arrived (`TEST.md` C7; kept as it is in C2 Part 2, which only stops the bot calling it money owed back) | The card can show a surplus for a transfer nobody has seen yet | `payments.current` (`overpayment_amount`) |
 
 ## 5. Reports
 
 | # | Gap | Why it matters | Where |
 |---|---|---|---|
 | G26 | "Comprobantes marcados" and "por confirmar" count all time, not the selected period | They don't change with Hoy / 7 / 30 days (decided in Task C) | `reports.snapshot` |
-| G27 | "Cómo pagaron" sums the agreed split, not money confirmed or received. A TRANSFER order paid with registered cash still counts as transfer there (not fixed in C2 Part 1) | Agreed transfers may be read as money in the account | `reports.snapshot` |
 | G28 | "Ventas" counts customer-confirmed orders not yet accepted | A later rejection removes it from sales; until then it looks sold | `reports.COUNTED` |
+| G33 | No refund records. "Pagos de pedidos cancelados/rechazados" lists money registered on stopped orders, and confirmed overpayments are listed, but nothing records whether money went back | Staff must check by hand which customers were paid back | `reports._payments` |
 
 ## 6. Small items
 
@@ -79,3 +78,7 @@ Numbers are never reused: a closed gap moves to §7 and keeps its number.
 
 - G8 (closed 2026-10-01, first commit): `.gitignore` ignores `venv/` as well as `.venv/`;
   no virtualenv file is tracked.
+- G27, G29, G30 (closed 2026-10-07, Task C2 Part 2): "Cómo pagaron" counts what really came
+  in (registered cash and confirmed transfers); after an edit the bot copies a code-built
+  payment sentence that names the cash paid and the transfer and cash still owed
+  (`payments.md` §7-8).

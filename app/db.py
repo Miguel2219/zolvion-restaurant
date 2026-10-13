@@ -105,6 +105,11 @@ CREATE TABLE IF NOT EXISTS payments (
   method             TEXT NOT NULL,
   transfer_amount    INTEGER NOT NULL DEFAULT 0,
   cash_amount        INTEGER NOT NULL DEFAULT 0,
+  -- 1 while the method is CASH only because staff registered cash on an order with
+  -- no method chosen (Task C2 Part 2): discarding the last cash row takes it back.
+  method_from_cash   INTEGER NOT NULL DEFAULT 0,
+  -- Before Task C2 Part 2 (cash is one row per registration in cash_payments now).
+  -- Read only by the receipt migration in init(); nothing writes it.
   cash_received      INTEGER NOT NULL DEFAULT 0,
   -- Before Task C. Read once by the receipt migration in init(); nothing reads or
   -- writes them after that: overpayment_amount, status, flags, notes,
@@ -147,6 +152,19 @@ CREATE TABLE IF NOT EXISTS receipt_photos (
   receipt_id INTEGER PRIMARY KEY REFERENCES payment_receipts(id),
   mime       TEXT NOT NULL,
   data       BLOB NOT NULL
+);
+
+-- One row per cash registration (Task C2 Part 2). Staff already hold the money, so
+-- there is no confirmation step: a row can only be discarded, with a reason, and then
+-- it counts nothing anywhere.
+CREATE TABLE IF NOT EXISTS cash_payments (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id       INTEGER NOT NULL REFERENCES orders(id),
+  amount         INTEGER NOT NULL CHECK (amount > 0),
+  status         TEXT NOT NULL DEFAULT 'RECEIVED',   -- RECEIVED | DISCARDED
+  registered_at  TEXT NOT NULL,
+  discarded_at   TEXT,
+  discard_reason TEXT                                 -- staff's words; nobody is told
 );
 
 CREATE TABLE IF NOT EXISTS outbound_messages (
@@ -201,6 +219,8 @@ MIGRATIONS = [
     ("orders", "edited_at", "ALTER TABLE orders ADD COLUMN edited_at TEXT"),
     ("payment_receipts", "discard_reason",
      "ALTER TABLE payment_receipts ADD COLUMN discard_reason TEXT"),
+    ("payments", "method_from_cash",
+     "ALTER TABLE payments ADD COLUMN method_from_cash INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -253,7 +273,7 @@ def reset() -> None:
     database = conn()
     for table in (
         "outbound_messages", "handoff_requests", "receipt_photos", "payment_receipts",
-        "payments", "order_transitions",
+        "cash_payments", "payments", "order_transitions",
         "order_items", "orders", "cart_items", "carts", "inbound_messages", "conversations",
     ):
         database.execute(f"DELETE FROM {table}")

@@ -1,8 +1,9 @@
-"""The owner's screen. Every figure is a SQL aggregate over real rows."""
+"""The owner's screen. Order figures are SQL aggregates over real rows; payment
+figures come from payments.current() per order, the only money math (C2 Part 2)."""
 
 from datetime import datetime, timedelta, timezone
 
-from . import db
+from . import db, payments
 from .catalog import CATALOG
 
 
@@ -22,6 +23,57 @@ def _since(days: int) -> str:
 
 
 COUNTED = ("CONFIRMED", "ACCEPTED", "READY", "OUT_FOR_DELIVERY", "COMPLETED")
+STOPPED = ("CANCELLED", "REJECTED")
+KINDS = ("CASH", "TRANSFER", "MIXED", "NONE")
+
+
+def _payment_kind(pay: dict) -> str:
+    """How an order was really paid: only what came in counts (registered cash and
+    transfers a person confirmed), never the agreed method nor a receipt that waits."""
+    cash, transfer = pay["cash_received"] > 0, pay["confirmed"] > 0
+    if cash and transfer:
+        return "MIXED"
+    return "CASH" if cash else "TRANSFER" if transfer else "NONE"
+
+
+def _payments(since: str) -> dict:
+    """"Cómo pagaron" over the Ventas orders, the confirmed overpayments among them,
+    and the cancelled or rejected orders that still received money."""
+    how_paid = {kind: {"kind": kind, "orders": 0, "received": 0} for kind in KINDS}
+    overpaid = []
+    marks = ",".join("?" * len(COUNTED))
+    for row in db.q(
+        f"SELECT id, code FROM orders WHERE created_at >= ? AND state IN ({marks}) ORDER BY id",
+        (since, *COUNTED),
+    ):
+        pay = payments.current(row["id"])
+        kind = how_paid[_payment_kind(pay)]
+        kind["orders"] += 1
+        kind["received"] += pay["received"]                 # not capped at the total
+        if pay["confirmed_overpayment"]:
+            overpaid.append({
+                "code": row["code"], "total": pay["total"], "received": pay["received"],
+                "surplus": pay["confirmed_overpayment"],
+            })
+    stopped = []
+    marks = ",".join("?" * len(STOPPED))
+    for row in db.q(
+        f"SELECT id, code, state FROM orders WHERE created_at >= ? AND state IN ({marks})"
+        " ORDER BY id",
+        (since, *STOPPED),
+    ):
+        pay = payments.current(row["id"])
+        if pay["received"]:
+            stopped.append({
+                "code": row["code"], "state": row["state"], "total": pay["total"],
+                "received": pay["received"], "cash": pay["cash_received"],
+                "confirmed": pay["confirmed"],
+            })
+    return {
+        "how_paid": list(how_paid.values()),
+        "confirmed_overpayments": overpaid,
+        "stopped_with_payments": stopped,
+    }
 
 
 def snapshot(days: int = 1) -> dict:
@@ -52,19 +104,6 @@ def snapshot(days: int = 1) -> dict:
                 FROM order_items oi JOIN orders o ON o.id = oi.order_id
                 WHERE o.created_at >= ? AND o.state IN ({marks})
                 GROUP BY oi.name ORDER BY units DESC, revenue DESC LIMIT 5""",
-            (since, *COUNTED),
-        )
-    ]
-
-    by_method = [
-        dict(row)
-        for row in db.q(
-            f"""SELECT p.method AS method, COUNT(*) AS n,
-                       COALESCE(SUM(p.transfer_amount),0) AS transfer,
-                       COALESCE(SUM(p.cash_amount),0) AS cash
-                FROM payments p JOIN orders o ON o.id = p.order_id
-                WHERE o.created_at >= ? AND o.state IN ({marks})
-                GROUP BY p.method""",
             (since, *COUNTED),
         )
     ]
@@ -108,7 +147,7 @@ def snapshot(days: int = 1) -> dict:
         "delivery_fees": totals["delivery_fees"] or 0,
         "by_state": by_state,
         "top_items": top_items,
-        "by_method": by_method,
+        **_payments(since),
         "fulfilment": fulfilment,
         "receipts_flagged": flagged,
         "receipts_awaiting_confirmation": awaiting,

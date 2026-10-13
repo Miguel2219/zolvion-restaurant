@@ -36,6 +36,8 @@
   .bar{height:6px;border-radius:4px;background:#20262f;overflow:hidden;margin-top:5px}
   .bar i{display:block;height:100%;background:var(--accent)}
   .empty{color:var(--muted);font-size:13px}
+  .hint{color:var(--muted);font-size:12.5px;margin:-4px 0 8px}
+  .sub{color:var(--muted);font-size:12.5px;margin-top:2px}
 </style>
 </head>
 <body>
@@ -53,7 +55,15 @@
   <div class="tiles" id="tiles"></div>
   <div class="grid">
     <section class="panel"><h2>Más vendidos</h2><div id="top"></div></section>
-    <section class="panel"><h2>Cómo pagaron</h2><div id="pay"></div></section>
+    <section class="panel"><h2>Cómo pagaron</h2>
+      <div class="hint">Dinero recibido: efectivo registrado y transferencias confirmadas por el local. Los comprobantes que esperan confirmación todavía no cuentan.</div>
+      <div id="pay"></div></section>
+    <section class="panel"><h2>Pagos de más confirmados</h2>
+      <div class="hint">Efectivo registrado y transferencias confirmadas por encima del total del pedido. El local resuelve la diferencia con el cliente.</div>
+      <div id="over"></div></section>
+    <section class="panel"><h2>Pagos de pedidos cancelados/rechazados</h2>
+      <div class="hint">Pedidos cancelados o rechazados con efectivo registrado o transferencias confirmadas. Revíselos con el personal: este reporte no registra devoluciones.</div>
+      <div id="stopped"></div></section>
     <section class="panel"><h2>Recoge vs domicilio</h2><div id="ful"></div></section>
     <section class="panel"><h2>Pedidos que no se concretaron</h2><div id="lost"></div></section>
   </div>
@@ -62,7 +72,10 @@
 const money = n => '$' + (n||0).toLocaleString('es-CO');
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const LOST = {CANCELLED:'Cancelados', REJECTED:'Rechazados por el local', EXPIRED:'Vencidos sin respuesta'};
-const METODO = {CASH:'Efectivo', TRANSFER:'Transferencia', MIXED:'Mixto', UNSPECIFIED:'Sin especificar'};
+// What really came in on each order: registered cash, confirmed transfers, or both.
+const KIND = {CASH:'Efectivo', TRANSFER:'Transferencia', MIXED:'Mixto', NONE:'Sin pago registrado'};
+const STOPPED = {CANCELLED:'Cancelado', REJECTED:'Rechazado'};
+const pedidos = n => n + (n === 1 ? ' pedido' : ' pedidos');
 
 function tile(k, v, s, cls){
   return `<div class="tile"><div class="k">${k}</div>
@@ -95,10 +108,25 @@ async function draw(){
   document.getElementById('top').innerHTML =
     bars(d.top_items, 'name', 'units', r => r.units + ' · ' + money(r.revenue));
 
-  document.getElementById('pay').innerHTML = d.by_method.length
-    ? d.by_method.map(m => `<div class="row"><div>${esc(METODO[m.method] || m.method)}</div>
-        <div class="n">${m.method === 'UNSPECIFIED' ? m.n : m.n + ' · ' + money(m.transfer + m.cash)}</div></div>`).join('')
+  const kinds = d.how_paid.filter(k => k.orders > 0);
+  document.getElementById('pay').innerHTML = kinds.length
+    ? kinds.map(k => `<div class="row"><div>${esc(KIND[k.kind] || k.kind)}</div>
+        <div class="n">${k.kind === 'NONE' ? pedidos(k.orders)
+          : pedidos(k.orders) + ' · Dinero recibido ' + money(k.received)}</div></div>`).join('')
     : '<div class="empty">Sin datos todavía</div>';
+
+  document.getElementById('over').innerHTML = d.confirmed_overpayments.length
+    ? d.confirmed_overpayments.map(o => `<div class="row">
+        <div>${esc(o.code)} · total ${money(o.total)} · recibido ${money(o.received)}</div>
+        <div class="n">de más ${money(o.surplus)}</div></div>`).join('')
+    : '<div class="empty">Ninguno.</div>';
+
+  document.getElementById('stopped').innerHTML = d.stopped_with_payments.length
+    ? d.stopped_with_payments.map(o => `<div class="row">
+        <div>${esc(o.code)} · ${esc(STOPPED[o.state] || o.state)} · total ${money(o.total)}
+          <div class="sub">(efectivo ${money(o.cash)}, transferencias confirmadas ${money(o.confirmed)})</div></div>
+        <div class="n">Pagos registrados ${money(o.received)}</div></div>`).join('')
+    : '<div class="empty">Ninguno.</div>';
 
   document.getElementById('ful').innerHTML = d.fulfilment.length
     ? d.fulfilment.map(f => `<div class="row">

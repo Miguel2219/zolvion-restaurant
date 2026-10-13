@@ -35,9 +35,10 @@ Prices are integers in pesos. The prompt lists each item as
 (`KNOWN-GAPS.md` G18–G19).
 
 Note on `payments.methods`: the customer can only choose a listed method, but registering
-cash writes `CASH` even when it is not listed (staff already hold the money). Later edits
-of that order still work (`CURRENT-STATE.md` R7, fixed in C2 Part 1 and checked by hand
-on 2026-10-06 with `CASH` removed).
+cash writes `CASH` even when it is not listed (staff already hold the money); discarding
+the last cash row takes that `CASH` back (`payments.md` §1). Later edits of that order
+still work (`CURRENT-STATE.md` R7, fixed in C2 Part 1 and checked by hand on 2026-10-06
+with `CASH` removed).
 
 ## 2. Current content (Caseritas Burger)
 

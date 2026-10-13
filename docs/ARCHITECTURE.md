@@ -47,11 +47,11 @@ before it is sent.
 | `db.py` | Schema, thread-local connection, `run()/q()/q1()`, `transaction()`, startup migrations |
 | `cart.py` | Cart changes, identical-line merge, `LineChoiceNeeded`; `summary()` is the only producer of a total |
 | `orders.py` | State machine, modification windows, `amend()`, `board()`, `live_states()` |
-| `payments.py` | Methods, receipts and their checks, confirm/discard (people only), cash, `follow_total`, `current()` |
+| `payments.py` | Methods, receipts and their checks, cash rows, confirm/discard of receipts and cash (people only), `follow_total`, `current()` |
 | `handoff.py` | `request` / `resolve` / `open_for`: the amber "Necesita a una persona" box |
 | `wa.py` | WhatsApp Cloud API (Graph v21.0): send, download media, signature, parse webhook, FAKE mode |
-| `brain.py` | System prompt, ESTADO REAL block, `TOOLS`, `_run_tool`, chat history, `extract_proof` |
-| `reports.py` | SQL aggregates for the reports page |
+| `brain.py` | System prompt, ESTADO REAL block, `TOOLS`, `_run_tool`, chat history, the payment sentence and the end-of-turn payment check (`_finish_turn`), `extract_proof` |
+| `reports.py` | SQL aggregates for the reports page; payments per order through `payments.current()` |
 | `main.py` | HTTP routes, `handle()`, `_note_for()`, `notify()`, customer messages for confirm/discard, `_clean_for_customer()`; creates the database on import |
 
 `static/`: `kitchen.html`, `simulator.html`, `reports.html`: plain HTML + JS, no build
@@ -66,13 +66,14 @@ step. Panel buttons send event names straight from `orders.TRANSITIONS`.
 | `POST /sim/message` | Inbound from the simulator (text and/or base64 image) |
 | `GET /sim/outbound`, `GET /sim/conversation` | Simulator reads replies / rebuilds the thread |
 | `GET /api/config` | Business data, WhatsApp live or not, accounts |
-| `GET /api/board` | Non-terminal orders with items, payment (receipts included), transitions, open handoffs |
+| `GET /api/board` | Non-terminal orders with items, payment (receipts and cash rows included, discarded ones too), transitions, open handoffs |
 | `POST /api/orders/{id}/event` | Staff button. 409 if illegal; 400 if reject/cancel has no reason |
 | `POST /api/orders/{id}/handoff/resolve` | "Ya lo atendí" |
 | `POST /api/orders/{id}/receipts/{rid}/confirm` | A person confirms one receipt (amount received); the customer is told |
 | `POST /api/orders/{id}/receipts/{rid}/discard` | A person discards one receipt with a reason; the customer is told |
 | `GET /api/receipts/{rid}/photo` | The receipt image ("Sin foto." 404 when none) |
-| `POST /api/orders/{id}/payment/cash` | Staff registers cash received (never above what is owed) |
+| `POST /api/orders/{id}/payment/cash` | Staff registers cash received: one row, never above what is owed |
+| `POST /api/orders/{id}/cash/{cid}/discard` | A person discards one cash row with a reason; nobody is told |
 | `GET /api/report?days=N` | Reports data |
 | `POST /api/reset` | Deletes every row in every table and all chat history |
 | `POST /api/reload-config` | Re-reads the config, but only `brain` sees it (`CONFIG.md`) |
@@ -89,9 +90,10 @@ No route requires a login (`KNOWN-GAPS.md` G1).
 | `carts`, `cart_items` | Work in progress (`OPEN`, `CONVERTED`). `related_order_id` marks a separate order opened next to a locked one |
 | `orders`, `order_items` | The order: code `P-1234`, state, pickup/delivery, address, zone, subtotal, fee, total, `edited_at` |
 | `order_transitions` | Append-only log: from, to, actor (`customer`/`staff`/`system`), reason, time |
-| `payments` | One per order: method, agreed `transfer_amount`/`cash_amount`, `cash_received`. Older columns (`status`, `flags`, `notes`, `overpayment_amount`, `unreviewed_proofs`, `proof_*`, `extracted`) are legacy |
+| `payments` | One per order: method, agreed `transfer_amount`/`cash_amount`, `method_from_cash`. Older columns (`cash_received`, `status`, `flags`, `notes`, `overpayment_amount`, `unreviewed_proofs`, `proof_*`, `extracted`) are legacy |
 | `payment_receipts` | One per receipt image: status, flags, notes, reference, OCR JSON, `received_at`, `confirmed_amount`/`_at`, `discarded_at`, `discard_reason` |
 | `receipt_photos` | The image bytes, one per receipt, kept apart so listing receipts never loads them |
+| `cash_payments` | One per cash registration: amount, `RECEIVED`/`DISCARDED`, `registered_at`, `discarded_at`, `discard_reason` |
 | `outbound_messages` | Every message sent (or faked): `SENT`/`FAILED`/`FAKE`, error text |
 | `handoff_requests` | Requests passed to a person; `resolved_at` set by "Ya lo atendí" |
 
@@ -128,8 +130,12 @@ and drops the old `payments_reference_unique` index.
 1. **Conversation** (`brain.reply`): system prompt = persona + fixed rules + menu with
    ids and prices + hours + zones + accounts + the `ESTADO REAL AHORA` block, recomputed
    on every model call (live orders' states and the newest order's payment in words, no
-   amounts, no codes). Model: `ANTHROPIC_MODEL`, or the first available id containing
-   `sonnet`, then `opus`, then `haiku`. Each tool call is printed to the console.
+   amounts, no codes). What the bot says about money is a code-built sentence it copies;
+   `_finish_turn` checks every reply that speaks about payment (`payments.md` §7). Model: `ANTHROPIC_MODEL`, or the first available id containing
+   `haiku`, then `sonnet`, then `opus`. It must accept a forced `tool_choice` (payment
+   questions force `order_status`): Haiku 5.5 does, Sonnet 5.5 and Opus 5.5 don't (G34).
+   Each tool call is printed to the console.
 2. **Receipt reading** (`brain.extract_proof`): raw JSON only (amount, destination and
    origin account and holder, reference, date, `date_iso`, provider). It never judges
-   the payment; `payments.md` covers the checks.
+   the payment; `payments.md` covers the checks. Model: `ANTHROPIC_PROOF_MODEL`, or the
+   conversation model when empty.

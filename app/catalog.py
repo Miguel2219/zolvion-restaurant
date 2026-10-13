@@ -85,6 +85,15 @@ class Catalog:
                     return int(zone["fee"]), zone["name"]
         return int(self.fulfilment.get("default_delivery_fee", 0)), None
 
+    def prices(self) -> set[int]:
+        """Every amount the menu and the delivery table produce on their own: item and
+        modifier prices and delivery fees. brain's payment check lets the bot quote them."""
+        found = {int(item["price"]) for item in self._items.values()}
+        found |= {int(modifier["price"]) for modifier in self._modifiers.values()}
+        found |= {int(zone["fee"]) for zone in self.fulfilment.get("delivery_zones", [])}
+        found.add(int(self.fulfilment.get("default_delivery_fee", 0)))
+        return {price for price in found if price > 0}
+
     # ---- payments ----------------------------------------------------
 
     def accounts(self):
