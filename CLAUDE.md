@@ -6,10 +6,10 @@ Guidance for Claude Code in this repository. Details live in `docs/` (start at
 ## What this is
 
 The MVP of Zolvion Restaurant: WhatsApp ordering for restaurants, which Miguel demos and
-sells. First prospect: Caseritas Burger, Bucaramanga. One FastAPI process, SQLite, Claude
-with tool use, three static HTML pages. The full target architecture (queue, worker,
-Postgres, Terraform) is the sibling repo `zolvion-restaurant`: never copy code from here
-into it, and don't bring its rules, states or architecture here unless Miguel asks.
+sells; launch city Ocaña (Norte de Santander). Caseritas Burger is a test restaurant, not a
+prospect. One FastAPI process, PostgreSQL, Claude with tool use, three static HTML pages.
+Target architecture (queue, worker, Terraform): sibling repo `zolvion-restaurant`. Never
+copy code into it; don't bring its rules, states or architecture here unless Miguel asks.
 (`app/main.py`'s docstring still says "a convincing six-minute demo"; that is outdated.)
 
 Comments cite design docs (`order-modification.md`, `notifications-and-followups.md`,
@@ -23,14 +23,14 @@ Spanish, addressing the customer as *usted*. Every `.md` file stays under 200 li
 
 ## Commands
 
-Windows/PowerShell. The virtualenv is `venv/` (ignored by git, like `.venv/`).
-No linter or formatter is configured.
+Windows/PowerShell. The virtualenv is `venv/` (ignored by git, like `.venv/`). No linter.
+PostgreSQL 17 runs as the Windows service `postgresql-x64-17` (setup: `docs/BUILD-AND-RUN.md`).
 
 ```powershell
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
-python -m pytest tests -q                                   # 310 pass, 1 xfail (G16)
+python -m pytest tests -q                                   # 308 pass, 1 xfail (G16)
 python -m pytest tests -q -k wrong_amount                   # by name
 python -m pytest tests/test_flow.py::test_happy_path_pickup # one test
 ```
@@ -45,7 +45,7 @@ instead of 600.
   `reports` keep their import-time `CATALOG`. Restart uvicorn to change prices.
 - `.env` is read once, at import, by `app/__init__.py`. Empty `WHATSAPP_TOKEN` = FAKE
   mode: replies only go to `outbound_messages`, which the simulator reads.
-  `RESTAURANT_CONFIG` and `DEMO_DB` override the config and database paths.
+  `RESTAURANT_CONFIG` and `DATABASE_URL` override the config path and the database.
 - Manual tests: `TEST.md` (regression script) and the Notion "Task X Plan" checklists.
   `run.md` is setup plus the demo-day script.
 
@@ -66,7 +66,7 @@ POST /sim/message (browser)        ─┘         │
 | `__init__.py` | loads `.env` before any module reads `os.environ` |
 | `money.py` | `pesos()`, `total_of()`, `fmt()`; money is `int` COP, never float |
 | `catalog.py` | `CATALOG` from `config/restaurant.json`: prices, modifiers, zones, accounts, `owns_account`, `timezone()` |
-| `db.py` | schema (WAL), thread-local connection, `run()/q()/q1()`, `transaction()`, migrations in `init()`; `DB_PATH` fixed at import |
+| `db.py` | PostgreSQL schema (`init()`, no migrations), one autocommit psycopg connection per thread, `run()/q()/q1()/insert()`, `transaction()`, `IntegrityError`; `DATABASE_URL` fixed at import |
 | `cart.py` | cart mutations; identical lines merge; `LineChoiceNeeded`; `summary()` is the only producer of a total |
 | `orders.py` | `TRANSITIONS`, modification windows, `amend()`, `board()`, `live_states()` |
 | `payments.py` | `set_method`, `check_proof`, `confirm_receipt`/`discard_receipt`/`register_cash`/`discard_cash` (human only), `follow_total`, `current()` (the only money math) |
@@ -93,7 +93,7 @@ buttons send event names from `orders.TRANSITIONS`. Routes and tables: `docs/ARC
 4. **Uniqueness lives in the database.** `inbound_messages.wa_message_id` is the PK;
    `payment_receipts.reference` has a unique partial index (a discarded receipt keeps its
    reference). Code tells a resend from a reuse only after the `IntegrityError`.
-   `db.run()` rolls back on failure; `db.transaction()` groups writes that land together
+   A failed `db.run()` leaves nothing; `db.transaction()` groups writes that land together
    (`orders.amend`, `_store_receipt`, `register_cash`, `discard_cash`, `confirm_receipt`). Never call
    `check_proof` inside a transaction: it catches the `IntegrityError`.
 5. **Vocabulary:** "aceptado por el local" is the only phrase for `ACCEPTED` and later. A
@@ -105,7 +105,7 @@ buttons send event names from `orders.TRANSITIONS`. Routes and tables: `docs/ARC
 delivery via `OUT_FOR_DELIVERY` then `delivered`). Terminal: `COMPLETED`, `CANCELLED`,
 `REJECTED`, `EXPIRED`. Any `(state, event)` not in `TRANSITIONS` raises `IllegalTransition`
 (409). `staff_rejects`/`staff_cancels` need a reason (400). There is no `IN_PREPARATION`
-(Task B removed it; `db.init()` moves old rows to `ACCEPTED`). Nothing fires `expire`.
+(Task B removed it). Nothing fires `expire`.
 
 Modification windows (`orders.modification_window`, enforced by `brain._edit` before any
 item or delivery change):
@@ -130,9 +130,7 @@ from the staff's reason (`_stop_message`, template fallback). `COMPLETED` and cu
 ## Payments (`docs/payments.md`)
 
 - `payments` row per order: method (`UNSPECIFIED`, `CASH`, `TRANSFER`, `MIXED`), agreed split
-  (`transfer_amount`, `cash_amount`; `MIXED` validated by code), `method_from_cash`. Its
-  `cash_received` and old receipt columns are legacy: never written (`db.init()` copied the
-  receipt ones once into `payment_receipts`, which keeps that migration idempotent).
+  (`transfer_amount`, `cash_amount`; `MIXED` validated by code), `method_from_cash`.
 - **One `payment_receipts` row per image** (photo in `receipt_photos`): `PROOF_RECEIVED`,
   `FLAGGED`, `CONFIRMED`, `DISCARDED` (last two final); order status = worst receipt,
   discarded ignored, none = `PENDING`. **One `cash_payments` row per cash registration**
@@ -157,7 +155,7 @@ from the staff's reason (`_stop_message`, template fallback). `COMPLETED` and cu
 
 - History is in memory, per phone, last `HISTORY_TURNS` (24), trimmed without splitting a
   `tool_use`/`tool_result` pair, restored to its checkpoint on any exception. Restarting
-  uvicorn forgets conversations; orders survive in SQLite.
+  uvicorn forgets conversations; orders survive in PostgreSQL.
 - One global lock serializes turns for all phones (`extract_proof` runs outside it). Every
   route that writes is `async` with no `await` around database work, so writes run one at a
   time; `orders.amend` still keeps a guarded `UPDATE … WHERE state IN (…)`.
@@ -187,7 +185,8 @@ a change to the payment hands out the sentence with `_hand_out_sentence`.
 
 ## Tests (`tests/test_flow.py`; code-review defects R1–R12 in `tests/test_review_bugs.py`)
 
-- Set `DEMO_DB` **before** importing `app`; `db.DB_PATH` is resolved at import.
+- `tests/conftest.py` points `DATABASE_URL` at `<name>_test` on the same server before `app`
+  is imported (it is fixed at import) and creates that database. PostgreSQL must be running.
 - Expected numbers come from `config/restaurant.json`; changing a price moves tests on purpose.
 - No model calls. `notify()` runs in FAKE mode and is read back from `outbound_messages`. An
   autouse fixture resets every table between tests.

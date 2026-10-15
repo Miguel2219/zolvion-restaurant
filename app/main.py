@@ -8,7 +8,6 @@ import base64
 import uuid
 import os
 import re
-import sqlite3
 import traceback
 from pathlib import Path
 
@@ -40,6 +39,7 @@ def _startup_check() -> None:
         f"  Comprobantes  : {proof_model}",
         f"  WhatsApp      : {'conectado' if wa.live() else 'modo simulador'}",
         f"  Firma webhook : {'verificando' if wa.app_secret() else 'sin APP_SECRET (no verifica)'}",
+        f"  Base de datos : PostgreSQL {db.describe()}",
         "",
         "  Simulador  http://localhost:8000/simulator",
         "  Cocina     http://localhost:8000/kitchen",
@@ -396,10 +396,10 @@ async def inbound(request: Request):
         try:
             db.run(
                 "INSERT INTO inbound_messages(wa_message_id, phone, body, kind, received_at)"
-                " VALUES(?,?,?,?,?)",
+                " VALUES(%s,%s,%s,%s,%s)",
                 (wa_id, phone, message.get("text"), message.get("kind", "text"), received_at),
             )
-        except sqlite3.IntegrityError:
+        except db.IntegrityError:
             continue                              # duplicate delivery: exactly one row
         if message.get("kind") == "reaction":
             continue                              # an emoji on a message needs no answer
@@ -447,7 +447,7 @@ async def sim_message(request: Request):
     received_at = db.now()
     db.run(
         "INSERT INTO inbound_messages(wa_message_id, phone, body, kind, received_at)"
-        " VALUES(?,?,?,?,?)",
+        " VALUES(%s,%s,%s,%s,%s)",
         (
             f"sim-{uuid.uuid4().hex}", phone,
             text or ("📎 comprobante" if image else ""),
@@ -471,7 +471,7 @@ async def sim_message(request: Request):
 def sim_outbound(phone: str, after: int = 0):
     rows = db.q(
         "SELECT id, body, status, sent_at FROM outbound_messages"
-        " WHERE phone=? AND id>? ORDER BY id",
+        " WHERE phone=%s AND id>%s ORDER BY id",
         (phone, after),
     )
     return {"messages": [dict(r) for r in rows]}
@@ -484,13 +484,13 @@ def sim_conversation(phone: str):
     thread = [
         {"role": "customer", "body": row["body"], "at": row["received_at"], "id": 0}
         for row in db.q(
-            "SELECT body, received_at FROM inbound_messages WHERE phone=? ORDER BY rowid",
+            "SELECT body, received_at FROM inbound_messages WHERE phone=%s ORDER BY received_at",
             (phone,),
         )
     ] + [
         {"role": "bot", "body": row["body"], "at": row["sent_at"], "id": row["id"]}
         for row in db.q(
-            "SELECT id, body, sent_at FROM outbound_messages WHERE phone=? ORDER BY id",
+            "SELECT id, body, sent_at FROM outbound_messages WHERE phone=%s ORDER BY id",
             (phone,),
         )
     ]

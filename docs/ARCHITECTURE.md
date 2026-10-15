@@ -1,6 +1,6 @@
 # Architecture
 
-One Python process (FastAPI + uvicorn), one SQLite file, the Anthropic API for
+One Python process (FastAPI + uvicorn), one PostgreSQL database, the Anthropic API for
 understanding messages and reading receipts, and the WhatsApp Cloud API for sending
 and receiving. Three static HTML pages poll a JSON API.
 
@@ -21,7 +21,7 @@ and receiving. Three static HTML pages poll a JSON API.
                         wa.send_text() ── live: Meta API ── always: row in outbound_messages
                                                                         │
  Staff panel /kitchen  ── polls GET /api/board every 2 s ───────────────┤
- Reports /reports      ── polls GET /api/report every 4 s ──────────────┤  SQLite (demo.sqlite3, WAL)
+ Reports /reports      ── polls GET /api/report every 4 s ──────────────┤  PostgreSQL (DATABASE_URL)
  Simulator /simulator  ── polls GET /sim/outbound every 1.5 s ──────────┘
 ```
 
@@ -44,7 +44,7 @@ before it is sent.
 | `__init__.py` | Loads `.env` before any other module reads the environment |
 | `money.py` | `pesos()`, `total_of()`, `fmt()`: money is `int` COP, never float |
 | `catalog.py` | `CATALOG` from `config/restaurant.json`: prices, modifiers, zones, accounts, timezone, account matching |
-| `db.py` | Schema, thread-local connection, `run()/q()/q1()`, `transaction()`, startup migrations |
+| `db.py` | Schema (created at startup), one autocommit psycopg connection per thread, `run()/q()/q1()/insert()`, `transaction()`, `IntegrityError` |
 | `cart.py` | Cart changes, identical-line merge, `LineChoiceNeeded`; `summary()` is the only producer of a total |
 | `orders.py` | State machine, modification windows, `amend()`, `board()`, `live_states()` |
 | `payments.py` | Methods, receipts and their checks, cash rows, confirm/discard of receipts and cash (people only), `follow_total`, `current()` |
@@ -81,7 +81,7 @@ step. Panel buttons send event names straight from `orders.TRANSITIONS`.
 
 No route requires a login (`KNOWN-GAPS.md` G1).
 
-## 4. Data model (SQLite)
+## 4. Data model (PostgreSQL)
 
 | Table | What a row is |
 |---|---|
@@ -90,7 +90,7 @@ No route requires a login (`KNOWN-GAPS.md` G1).
 | `carts`, `cart_items` | Work in progress (`OPEN`, `CONVERTED`). `related_order_id` marks a separate order opened next to a locked one |
 | `orders`, `order_items` | The order: code `P-1234`, state, pickup/delivery, address, zone, subtotal, fee, total, `edited_at` |
 | `order_transitions` | Append-only log: from, to, actor (`customer`/`staff`/`system`), reason, time |
-| `payments` | One per order: method, agreed `transfer_amount`/`cash_amount`, `method_from_cash`. Older columns (`cash_received`, `status`, `flags`, `notes`, `overpayment_amount`, `unreviewed_proofs`, `proof_*`, `extracted`) are legacy |
+| `payments` | One per order: method, agreed `transfer_amount`/`cash_amount`, `method_from_cash`, `updated_at` |
 | `payment_receipts` | One per receipt image: status, flags, notes, reference, OCR JSON, `received_at`, `confirmed_amount`/`_at`, `discarded_at`, `discard_reason` |
 | `receipt_photos` | The image bytes, one per receipt, kept apart so listing receipts never loads them |
 | `cash_payments` | One per cash registration: amount, `RECEIVED`/`DISCARDED`, `registered_at`, `discarded_at`, `discard_reason` |
@@ -99,18 +99,18 @@ No route requires a login (`KNOWN-GAPS.md` G1).
 
 `payment_receipts.reference` has a unique partial index (when not null): a reused
 reference is rejected by the database and code decides resend vs. reuse. Times are UTC
-ISO strings with microseconds.
+ISO strings with microseconds (`TEXT`, compared as strings). Ids are `BIGINT` identity
+columns; money is `INTEGER` pesos, so `SUM()` comes back as an `int`.
 
-`db.init()` on every start: creates missing tables, adds missing columns
-(`db.MIGRATIONS`), moves `IN_PREPARATION` orders to `ACCEPTED`, copies each legacy
-payment with a receipt status into a first `payment_receipts` row (once; idempotent),
-and drops the old `payments_reference_unique` index.
+`db.init()` on every start creates the tables and the index where missing. There are no
+migrations: the PostgreSQL schema started empty in Task D Part 1 (the SQLite data and its
+upgrade steps were dropped), so the next column change needs one.
 
 ## 5. Where state lives
 
 | State | Where | Survives a restart? |
 |---|---|---|
-| Orders, payments, receipts, photos, carts, messages, handoffs | SQLite | Yes |
+| Orders, payments, receipts, photos, carts, messages, handoffs | PostgreSQL | Yes |
 | Chat history the AI sees (last 24 messages per phone) | Python memory | **No** |
 | Restaurant config | Loaded at import | Re-read only on restart |
 | `.env` | Read once at import | Re-read only on restart |

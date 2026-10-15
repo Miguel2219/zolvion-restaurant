@@ -26,7 +26,7 @@ Numbers are never reused: a closed gap moves to §7 and keeps its number.
 |---|---|---|---|
 | G5 | Runs on Miguel's laptop behind a free ngrok URL | Laptop off = restaurant offline; the URL changes on every ngrok restart, so Meta's webhook must be redone | `run.md` Steps 5–7 |
 | G6 | Temporary Meta token (24 h) | Replies silently stop the next day | `run.md` Step 5 |
-| G7 | The git repository is local only (no remote) and the database has no backup | One disk failure loses the code history and the restaurant's data | repo root, `demo.sqlite3` |
+| G7 | The database has no backup (the code is on GitHub since Task C2 Part 2) | One disk failure loses the restaurant's data | the local PostgreSQL (`DATABASE_URL`) |
 | G9 | `app/main.py`'s docstring still calls the code a "convincing six-minute demo" | Claude Code may treat MVP work as disposable (`CLAUDE.md` now says otherwise) | `app/main.py` |
 | G10 | FastAPI's `@app.on_event("startup")` is deprecated (2 of the 3 warnings in the test run; the third comes from Starlette's test client) | A future FastAPI upgrade may drop it | `main._startup_check` |
 
@@ -50,7 +50,7 @@ Numbers are never reused: a closed gap moves to §7 and keeps its number.
 | G18 | Opening hours not enforced; `open_days` and `closed_message` unused | The bot takes orders at any hour | `CONFIG.md` §1 |
 | G19 | `fulfilment.pickup` / `delivery` switches not enforced | A restaurant without delivery would still get delivery orders | `CONFIG.md` §1 |
 | G20 | `/api/reload-config` only updates the bot's copy of the config | Prices can differ between what the bot sees and what carts, receipts and reports use until a restart | `main.reload_config` |
-| G21 | One restaurant per running process (one config, database, number) | Several clients = several processes, or a multi-restaurant design (a SaaS decision) | `catalog.CATALOG`, `db.DB_PATH` |
+| G21 | One restaurant per running process (one config, database, number) | Several clients = several processes, or a multi-restaurant design (a SaaS decision) | `catalog.CATALOG`, `db.DATABASE_URL` |
 | G22 | With two live orders (an accepted one plus a separate one), a receipt image always lands on the newest | A receipt meant for the first order is checked against the second | `main.handle` |
 | G23 | A customer with no card who asks for a person reaches nobody | The notifications bell is planned as its own task | `brain` `request_handoff` |
 | G24 | Until Task D, staff contact the customer by hand; the bot keeps answering during a handoff | Two voices in one chat | `handoff.py` |

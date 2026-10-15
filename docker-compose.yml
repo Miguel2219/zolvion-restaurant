@@ -1,0 +1,24 @@
+# Alternative to a PostgreSQL installed on the machine: docker compose up -d, then
+# DATABASE_URL=postgresql://zolvion:zolvion@localhost:5433/zolvion in .env.
+# Port 5433 on the host, so it never collides with a PostgreSQL installed on 5432.
+# The tests create and use their own database, zolvion_test, on the same server.
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zolvion
+      POSTGRES_PASSWORD: zolvion
+      POSTGRES_DB: zolvion
+    ports:
+      - "5433:5432"
+    volumes:
+      - zolvion-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zolvion -d zolvion"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  zolvion-pg:

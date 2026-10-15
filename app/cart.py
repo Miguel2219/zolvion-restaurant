@@ -18,7 +18,7 @@ def peek_open_cart(phone: str) -> int | None:
     This is the discriminator for order-modification.md: 'an open cart always
     wins'. open_cart() creates on miss, so it can never answer this."""
     row = db.q1(
-        "SELECT id FROM carts WHERE phone=? AND state='OPEN' ORDER BY id DESC LIMIT 1",
+        "SELECT id FROM carts WHERE phone=%s AND state='OPEN' ORDER BY id DESC LIMIT 1",
         (phone,),
     )
     return row["id"] if row else None
@@ -26,25 +26,24 @@ def peek_open_cart(phone: str) -> int | None:
 
 def open_cart(phone: str, related_order_id: int | None = None) -> int:
     row = db.q1(
-        "SELECT id FROM carts WHERE phone=? AND state='OPEN' ORDER BY id DESC LIMIT 1",
+        "SELECT id FROM carts WHERE phone=%s AND state='OPEN' ORDER BY id DESC LIMIT 1",
         (phone,),
     )
     if row:
         return row["id"]
     db.run(
-        "INSERT OR IGNORE INTO conversations(phone, created_at) VALUES(?,?)",
+        "INSERT INTO conversations(phone, created_at) VALUES(%s,%s) ON CONFLICT DO NOTHING",
         (phone, db.now()),
     )
-    cursor = db.run(
+    return db.insert(
         "INSERT INTO carts(phone, state, related_order_id, created_at, updated_at)"
-        " VALUES(?,'OPEN',?,?,?)",
+        " VALUES(%s,'OPEN',%s,%s,%s) RETURNING id",
         (phone, related_order_id, db.now(), db.now()),
     )
-    return cursor.lastrowid
 
 
 def related_order_of(cart_id: int) -> int | None:
-    row = db.q1("SELECT related_order_id FROM carts WHERE id=?", (cart_id,))
+    row = db.q1("SELECT related_order_id FROM carts WHERE id=%s", (cart_id,))
     return row["related_order_id"] if row else None
 
 
@@ -63,7 +62,7 @@ def fill_from_order(phone: str, order: dict) -> int:
         )
         db.run(
             """INSERT INTO cart_items(cart_id, item_id, name, qty, unit_price, modifiers, note, line_total)
-               VALUES(?,?,?,?,?,?,?,?)""",
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 cart_id, item["item_id"], item["name"], item["qty"], unit_price,
                 json.dumps(modifier_ids), item.get("note"),
@@ -75,7 +74,7 @@ def fill_from_order(phone: str, order: dict) -> int:
 
 
 def _touch(cart_id: int) -> None:
-    db.run("UPDATE carts SET updated_at=? WHERE id=?", (db.now(), cart_id))
+    db.run("UPDATE carts SET updated_at=%s WHERE id=%s", (db.now(), cart_id))
 
 
 def _line_total(item_id: str, qty: int, modifier_ids: list[str]) -> int:
@@ -130,7 +129,7 @@ def add_item(phone: str, item_id: str, qty: int = 1, modifier_ids=None, note=Non
 
     cart_id = open_cart(phone)
     rows = db.q(
-        "SELECT * FROM cart_items WHERE cart_id=? AND item_id=? ORDER BY id",
+        "SELECT * FROM cart_items WHERE cart_id=%s AND item_id=%s ORDER BY id",
         (cart_id, item_id),
     )
     key = _line_key(modifier_ids, note)
@@ -140,7 +139,7 @@ def add_item(phone: str, item_id: str, qty: int = 1, modifier_ids=None, note=Non
         if new_qty > 50:
             raise CartError("La cantidad debe estar entre 1 y 50.")
         db.run(
-            "UPDATE cart_items SET qty=?, line_total=? WHERE id=?",
+            "UPDATE cart_items SET qty=%s, line_total=%s WHERE id=%s",
             (new_qty, _line_total(item_id, new_qty, modifier_ids), match["id"]),
         )
         _touch(cart_id)
@@ -151,7 +150,7 @@ def add_item(phone: str, item_id: str, qty: int = 1, modifier_ids=None, note=Non
     )
     db.run(
         """INSERT INTO cart_items(cart_id, item_id, name, qty, unit_price, modifiers, note, line_total)
-           VALUES(?,?,?,?,?,?,?,?)""",
+           VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
         (
             cart_id, item_id, item["name"], qty, unit_price,
             json.dumps(modifier_ids), note, _line_total(item_id, qty, modifier_ids),
@@ -164,7 +163,7 @@ def add_item(phone: str, item_id: str, qty: int = 1, modifier_ids=None, note=Non
 def remove_item(phone: str, item_id: str, qty: int | None = None) -> dict:
     cart_id = open_cart(phone)
     rows = db.q(
-        "SELECT * FROM cart_items WHERE cart_id=? AND item_id=? ORDER BY id DESC",
+        "SELECT * FROM cart_items WHERE cart_id=%s AND item_id=%s ORDER BY id DESC",
         (cart_id, item_id),
     )
     if not rows:
@@ -176,19 +175,19 @@ def remove_item(phone: str, item_id: str, qty: int | None = None) -> dict:
     remaining = qty if isinstance(qty, int) and qty > 0 else None
     for row in rows:
         if remaining is None:
-            db.run("DELETE FROM cart_items WHERE id=?", (row["id"],))
+            db.run("DELETE FROM cart_items WHERE id=%s", (row["id"],))
             continue
         if remaining <= 0:
             break
         if row["qty"] <= remaining:
             remaining -= row["qty"]
-            db.run("DELETE FROM cart_items WHERE id=?", (row["id"],))
+            db.run("DELETE FROM cart_items WHERE id=%s", (row["id"],))
         else:
             new_qty = row["qty"] - remaining
             remaining = 0
             modifier_ids = db.jloads(row["modifiers"], [])
             db.run(
-                "UPDATE cart_items SET qty=?, line_total=? WHERE id=?",
+                "UPDATE cart_items SET qty=%s, line_total=%s WHERE id=%s",
                 (new_qty, _line_total(row["item_id"], new_qty, modifier_ids), row["id"]),
             )
     _touch(cart_id)
@@ -199,7 +198,7 @@ def set_qty(phone: str, item_id: str, qty: int, line: tuple | None = None) -> di
     if not isinstance(qty, int) or qty < 0 or qty > 50:
         raise CartError("La cantidad debe estar entre 0 y 50.")
     cart_id = open_cart(phone)
-    rows = db.q("SELECT * FROM cart_items WHERE cart_id=? AND item_id=? ORDER BY id", (cart_id, item_id))
+    rows = db.q("SELECT * FROM cart_items WHERE cart_id=%s AND item_id=%s ORDER BY id", (cart_id, item_id))
     if not rows:
         if qty == 0:
             raise CartError("Ese producto no está en el pedido.")
@@ -215,13 +214,13 @@ def set_qty(phone: str, item_id: str, qty: int, line: tuple | None = None) -> di
         targets = rows
     keep = targets[0]
     for row in targets[1:]:
-        db.run("DELETE FROM cart_items WHERE id=?", (row["id"],))
+        db.run("DELETE FROM cart_items WHERE id=%s", (row["id"],))
     if qty == 0:
-        db.run("DELETE FROM cart_items WHERE id=?", (keep["id"],))
+        db.run("DELETE FROM cart_items WHERE id=%s", (keep["id"],))
     else:
         modifier_ids = db.jloads(keep["modifiers"], [])
         db.run(
-            "UPDATE cart_items SET qty=?, line_total=? WHERE id=?",
+            "UPDATE cart_items SET qty=%s, line_total=%s WHERE id=%s",
             (qty, _line_total(keep["item_id"], qty, modifier_ids), keep["id"]),
         )
     _touch(cart_id)
@@ -230,7 +229,7 @@ def set_qty(phone: str, item_id: str, qty: int, line: tuple | None = None) -> di
 
 def clear(phone: str) -> dict:
     cart_id = open_cart(phone)
-    db.run("DELETE FROM cart_items WHERE cart_id=?", (cart_id,))
+    db.run("DELETE FROM cart_items WHERE cart_id=%s", (cart_id,))
     _touch(cart_id)
     return summary(phone)
 
@@ -238,7 +237,7 @@ def clear(phone: str) -> dict:
 def summary(phone: str, zone: str | None = None, fulfilment: str = "PICKUP") -> dict:
     """The one function that produces a total. Code only."""
     cart_id = open_cart(phone)
-    rows = db.q("SELECT * FROM cart_items WHERE cart_id=? ORDER BY id", (cart_id,))
+    rows = db.q("SELECT * FROM cart_items WHERE cart_id=%s ORDER BY id", (cart_id,))
     lines = []
     for row in rows:
         modifier_ids = db.jloads(row["modifiers"], [])

@@ -3,10 +3,10 @@
 Start here. This file says what the system is, why it exists, and which document answers
 which question.
 
-Snapshot these docs describe: code last changed **2026-10-13** after Task C2 Part 2, the
-"Pagos" block (local folder `C:\Users\PC\Desktop\zolvion-demo`, git branch
-`feature/c2-part2-payments`), with 310 automated tests passing and 1 expected failure (G16);
-Notion task checklists A, B, C, C2 Part 1 and C2 Part 2 all ✅.
+Snapshot these docs describe: code last changed **2026-10-15**, Task D Part 1 (PostgreSQL
+instead of SQLite; local folder `C:\Users\PC\Desktop\zolvion-demo`, git branch
+`feature/d-whatsapp-chatwoot`), with 308 automated tests passing and 1 expected failure
+(G16); Notion task checklists A, B, C, C2 Part 1 and C2 Part 2 all ✅.
 Anything newer is not reflected here until the docs are updated.
 
 ---
@@ -36,8 +36,9 @@ customer as *usted*.
 Miguel sells this as a SaaS to restaurants. This MVP is what gets demoed to restaurant
 owners and, once it runs reliably, what the first restaurants use.
 
-- First prospect: **Caseritas Burger**, a burger restaurant in Bucaramanga owned by a
-  family member. The current menu config is theirs.
+- Launch city: **Ocaña** (Norte de Santander).
+- Test restaurant: **Caseritas Burger**, a burger restaurant in Bucaramanga owned by a
+  family member. The current menu config is theirs; it is not a prospect.
 - A new restaurant is a new config file, not a code change (`CONFIG.md`).
 - The demo's behaviours are default rules; each business will adjust them through its
   own configuration.
@@ -46,7 +47,7 @@ owners and, once it runs reliably, what the first restaurants use.
 
 | | `zolvion-restaurant` | This MVP (`zolvion-demo` folder) |
 |---|---|---|
-| What it is | Full target architecture: SQS FIFO, ECS Fargate, RDS Postgres, Terraform, React kitchen display | One FastAPI process, SQLite, static HTML panels, Claude with tool use |
+| What it is | Full target architecture: SQS FIFO, ECS Fargate, RDS Postgres, Terraform, React kitchen display | One FastAPI process, PostgreSQL, static HTML panels, Claude with tool use |
 | Status | Documented design, not being built as part of this MVP | **The product.** This is the system being sold and completed |
 | Reference for behaviour | No: its rules are not the reference here | Yes: decisions taken here are final for the MVP |
 

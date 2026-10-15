@@ -4,7 +4,6 @@ The model reads the screenshot. Code decides whether it is coherent.
 A person gives the final confirmation — the bot never confirms a payment."""
 
 import json
-import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from . import db
@@ -30,7 +29,7 @@ def _apply_split(order_id: int, method: str, transfer_amount=None, cash_amount=N
     """Writes a method and its split for the order's current total. It re-splits a
     method the order already has; it never checks the config (cash registration can
     write CASH when the config leaves it out)."""
-    order = db.q1("SELECT total FROM orders WHERE id=?", (order_id,))
+    order = db.q1("SELECT total FROM orders WHERE id=%s", (order_id,))
     if order is None:
         raise PaymentError("Ese pedido no existe.")
     total = order["total"]
@@ -63,10 +62,10 @@ def _apply_split(order_id: int, method: str, transfer_amount=None, cash_amount=N
 
     # method_from_cash survives only a re-split of the same method (follow_total on a
     # CASH that cash set); any other method write means cash no longer explains it.
-    # SQLite reads `method` in the CASE before this UPDATE changes it.
+    # The CASE reads `method` as it was before this UPDATE changes it.
     db.run(
-        "UPDATE payments SET method_from_cash = CASE WHEN method=? THEN method_from_cash ELSE 0 END,"
-        " method=?, transfer_amount=?, cash_amount=?, updated_at=? WHERE order_id=?",
+        "UPDATE payments SET method_from_cash = CASE WHEN method=%s THEN method_from_cash ELSE 0 END,"
+        " method=%s, transfer_amount=%s, cash_amount=%s, updated_at=%s WHERE order_id=%s",
         (method, method, transfer, cash, db.now(), order_id),
     )
     return current(order_id)
@@ -204,7 +203,7 @@ def receipts(order_id: int) -> list[dict]:
     `has_photo` says whether one exists and photo() fetches it."""
     rows = db.q(
         "SELECT r.*, EXISTS(SELECT 1 FROM receipt_photos ph WHERE ph.receipt_id = r.id)"
-        " AS has_photo FROM payment_receipts r WHERE r.order_id=? ORDER BY r.id",
+        " AS has_photo FROM payment_receipts r WHERE r.order_id=%s ORDER BY r.id",
         (order_id,),
     )
     found = []
@@ -230,7 +229,7 @@ def receipts(order_id: int) -> list[dict]:
 
 
 def photo(receipt_id: int) -> tuple[bytes, str] | None:
-    row = db.q1("SELECT data, mime FROM receipt_photos WHERE receipt_id=?", (receipt_id,))
+    row = db.q1("SELECT data, mime FROM receipt_photos WHERE receipt_id=%s", (receipt_id,))
     return (bytes(row["data"]), row["mime"]) if row else None
 
 
@@ -256,23 +255,22 @@ def _store_receipt(
     all. A duplicate reference rolls everything back and the IntegrityError
     propagates to check_proof."""
     with db.transaction():
-        cursor = db.run(
+        receipt_id = db.insert(
             "INSERT INTO payment_receipts(order_id, status, flags, notes, reference, extracted,"
-            " received_at) VALUES(?,?,?,?,?,?,?)",
+            " received_at) VALUES(%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (order_id, status, json.dumps(flags), json.dumps(notes), reference,
              json.dumps(extracted), received_at),
         )
-        receipt_id = cursor.lastrowid
         if photo is not None:
             db.run(
-                "INSERT INTO receipt_photos(receipt_id, mime, data) VALUES(?,?,?)",
+                "INSERT INTO receipt_photos(receipt_id, mime, data) VALUES(%s,%s,%s)",
                 (receipt_id, photo[1], photo[0]),
             )
         if inferred is not None:
             method, transfer, cash = inferred
             db.run(
-                "UPDATE payments SET method=?, transfer_amount=?, cash_amount=?, method_from_cash=0,"
-                " updated_at=? WHERE order_id=?",
+                "UPDATE payments SET method=%s, transfer_amount=%s, cash_amount=%s, method_from_cash=0,"
+                " updated_at=%s WHERE order_id=%s",
                 (method, transfer, cash, db.now(), order_id),
             )
     return receipt_id
@@ -304,7 +302,7 @@ def check_proof(
         received_at = db.now()
     row = db.q1(
         "SELECT o.created_at FROM payments p JOIN orders o ON o.id = p.order_id"
-        " WHERE p.order_id=?",
+        " WHERE p.order_id=%s",
         (order_id,),
     )
     if row is None:
@@ -377,10 +375,10 @@ def check_proof(
         receipt_id = _store_receipt(
             order_id, status, flags, notes, reference, extracted, received_at, photo, inferred,
         )
-    except sqlite3.IntegrityError:
+    except db.IntegrityError:
         owner = db.q1(
             "SELECT order_id, extracted, status, discard_reason FROM payment_receipts"
-            " WHERE reference=?", (reference,)
+            " WHERE reference=%s", (reference,)
         ) if reference else None
         if owner is None:
             raise
@@ -413,7 +411,7 @@ def check_proof(
 def confirm_receipt(order_id: int, receipt_id: int, amount=None) -> dict:
     """Only a person calls this, from the panel. `amount` is what they actually
     received with this receipt; None falls back to the amount read from it."""
-    r = db.q1("SELECT * FROM payment_receipts WHERE id=?", (receipt_id,))
+    r = db.q1("SELECT * FROM payment_receipts WHERE id=%s", (receipt_id,))
     if r is None or r["order_id"] != order_id:
         raise PaymentError("Ese comprobante no es de este pedido.")
     if r["status"] == "CONFIRMED":
@@ -440,13 +438,13 @@ def confirm_receipt(order_id: int, receipt_id: int, amount=None) -> dict:
 
     with db.transaction():
         db.run(
-            "UPDATE payment_receipts SET status='CONFIRMED', confirmed_amount=?, confirmed_at=?"
-            " WHERE id=?",
+            "UPDATE payment_receipts SET status='CONFIRMED', confirmed_amount=%s, confirmed_at=%s"
+            " WHERE id=%s",
             (received, db.now(), receipt_id),
         )
         pay = db.q1(
             "SELECT p.method, o.total FROM payments p JOIN orders o ON o.id = p.order_id"
-            " WHERE p.order_id=?",
+            " WHERE p.order_id=%s",
             (order_id,),
         )
         if pay["method"] in ("UNSPECIFIED", "CASH"):
@@ -454,19 +452,19 @@ def confirm_receipt(order_id: int, receipt_id: int, amount=None) -> dict:
             # sanctioned by a person.
             confirmed = db.q1(
                 "SELECT COALESCE(SUM(confirmed_amount),0) AS n FROM payment_receipts"
-                " WHERE order_id=? AND status='CONFIRMED'",
+                " WHERE order_id=%s AND status='CONFIRMED'",
                 (order_id,),
             )["n"]
             if confirmed >= pay["total"]:
                 db.run(
-                    "UPDATE payments SET method='TRANSFER', transfer_amount=?, cash_amount=0,"
-                    " method_from_cash=0, updated_at=? WHERE order_id=?",
+                    "UPDATE payments SET method='TRANSFER', transfer_amount=%s, cash_amount=0,"
+                    " method_from_cash=0, updated_at=%s WHERE order_id=%s",
                     (pay["total"], db.now(), order_id),
                 )
             else:
                 db.run(
-                    "UPDATE payments SET method='MIXED', transfer_amount=?, cash_amount=?,"
-                    " method_from_cash=0, updated_at=? WHERE order_id=?",
+                    "UPDATE payments SET method='MIXED', transfer_amount=%s, cash_amount=%s,"
+                    " method_from_cash=0, updated_at=%s WHERE order_id=%s",
                     (confirmed, pay["total"] - confirmed, db.now(), order_id),
                 )
     # It never writes payments.transfer_amount on a TRANSFER/MIXED order: the
@@ -485,7 +483,7 @@ def discard_receipt(order_id: int, receipt_id: int, reason: str | None) -> dict:
     reason = (reason or "").strip()
     if not reason:
         raise PaymentError("Hace falta el motivo para avisarle al cliente.")
-    r = db.q1("SELECT order_id, status FROM payment_receipts WHERE id=?", (receipt_id,))
+    r = db.q1("SELECT order_id, status FROM payment_receipts WHERE id=%s", (receipt_id,))
     if r is None or r["order_id"] != order_id:
         raise PaymentError("Ese comprobante no es de este pedido.")
     if r["status"] == "CONFIRMED":
@@ -493,8 +491,8 @@ def discard_receipt(order_id: int, receipt_id: int, reason: str | None) -> dict:
     if r["status"] == "DISCARDED":
         raise PaymentError("Ese comprobante ya está descartado.")
     db.run(
-        "UPDATE payment_receipts SET status='DISCARDED', discarded_at=?, discard_reason=?"
-        " WHERE id=?",
+        "UPDATE payment_receipts SET status='DISCARDED', discarded_at=%s, discard_reason=%s"
+        " WHERE id=%s",
         (db.now(), reason, receipt_id),
     )
     record = current(order_id)
@@ -523,7 +521,7 @@ def follow_total(order_id: int) -> dict:
             else:
                 db.run(
                     "UPDATE payments SET method='UNSPECIFIED', transfer_amount=0, cash_amount=0,"
-                    " method_from_cash=0, updated_at=? WHERE order_id=?",
+                    " method_from_cash=0, updated_at=%s WHERE order_id=%s",
                     (db.now(), order_id),
                 )
                 return {"ask_method": True}
@@ -532,13 +530,13 @@ def follow_total(order_id: int) -> dict:
     if method == "MIXED":
         transfer = min(before["transfer_amount"], total)
         db.run(
-            "UPDATE payments SET transfer_amount=?, cash_amount=?, updated_at=? WHERE order_id=?",
+            "UPDATE payments SET transfer_amount=%s, cash_amount=%s, updated_at=%s WHERE order_id=%s",
             (transfer, total - transfer, db.now(), order_id),
         )
     else:
         db.run(
-            "UPDATE payments SET method='TRANSFER', transfer_amount=?, cash_amount=0,"
-            " method_from_cash=0, updated_at=? WHERE order_id=?",
+            "UPDATE payments SET method='TRANSFER', transfer_amount=%s, cash_amount=0,"
+            " method_from_cash=0, updated_at=%s WHERE order_id=%s",
             (total, db.now(), order_id),
         )
     return {"ask_method": False}
@@ -565,15 +563,15 @@ def register_cash(order_id: int, amount) -> dict:
         )
     with db.transaction():
         db.run(
-            "INSERT INTO cash_payments(order_id, amount, registered_at) VALUES(?,?,?)",
+            "INSERT INTO cash_payments(order_id, amount, registered_at) VALUES(%s,%s,%s)",
             (order_id, amount, db.now()),
         )
-        db.run("UPDATE payments SET updated_at=? WHERE order_id=?", (db.now(), order_id))
+        db.run("UPDATE payments SET updated_at=%s WHERE order_id=%s", (db.now(), order_id))
         # Written directly, not through set_method: a config without CASH among its
         # methods must not stop staff from registering cash they already hold.
         db.run(
-            "UPDATE payments SET method='CASH', transfer_amount=0, cash_amount=?, method_from_cash=1"
-            " WHERE order_id=? AND method='UNSPECIFIED'",
+            "UPDATE payments SET method='CASH', transfer_amount=0, cash_amount=%s, method_from_cash=1"
+            " WHERE order_id=%s AND method='UNSPECIFIED'",
             (before["total"], order_id),
         )
     return current(order_id)
@@ -589,28 +587,28 @@ def discard_cash(order_id: int, cash_id: int, reason: str | None) -> dict:
     reason = (reason or "").strip()
     if not reason:
         raise PaymentError("Hace falta el motivo.")
-    row = db.q1("SELECT order_id, status FROM cash_payments WHERE id=?", (cash_id,))
+    row = db.q1("SELECT order_id, status FROM cash_payments WHERE id=%s", (cash_id,))
     if row is None or row["order_id"] != order_id:
         raise PaymentError("Ese efectivo no es de este pedido.")
     if row["status"] == "DISCARDED":
         raise PaymentError("Ese efectivo ya está descartado.")
     with db.transaction():
         db.run(
-            "UPDATE cash_payments SET status='DISCARDED', discarded_at=?, discard_reason=?"
-            " WHERE id=?",
+            "UPDATE cash_payments SET status='DISCARDED', discarded_at=%s, discard_reason=%s"
+            " WHERE id=%s",
             (db.now(), reason, cash_id),
         )
         left = db.q1(
-            "SELECT COUNT(*) AS n FROM cash_payments WHERE order_id=? AND status='RECEIVED'",
+            "SELECT COUNT(*) AS n FROM cash_payments WHERE order_id=%s AND status='RECEIVED'",
             (order_id,),
         )["n"]
         if not left:
             db.run(
                 "UPDATE payments SET method='UNSPECIFIED', transfer_amount=0, cash_amount=0,"
-                " method_from_cash=0 WHERE order_id=? AND method='CASH' AND method_from_cash=1",
+                " method_from_cash=0 WHERE order_id=%s AND method='CASH' AND method_from_cash=1",
                 (order_id,),
             )
-        db.run("UPDATE payments SET updated_at=? WHERE order_id=?", (db.now(), order_id))
+        db.run("UPDATE payments SET updated_at=%s WHERE order_id=%s", (db.now(), order_id))
     record = current(order_id)
     record["cash_row"] = next(c for c in record["cash"] if c["id"] == cash_id)
     return record
@@ -620,18 +618,18 @@ def cash_rows(order_id: int) -> list[dict]:
     """Every cash registration of an order, oldest first, discarded ones included."""
     return [dict(row) for row in db.q(
         "SELECT id, order_id, amount, status, registered_at, discarded_at, discard_reason"
-        " FROM cash_payments WHERE order_id=? ORDER BY id",
+        " FROM cash_payments WHERE order_id=%s ORDER BY id",
         (order_id,),
     )]
 
 
 def current(order_id: int) -> dict:
-    # The legacy payments columns (cash_received included) are named out of this query
-    # on purpose, so they never leak into the JSON the panel reads.
+    # Columns named one by one, so nothing added to payments later leaks into the
+    # JSON the panel reads.
     row = db.q1(
         "SELECT p.id, p.order_id, p.method, p.transfer_amount, p.cash_amount,"
         " p.method_from_cash, p.updated_at, o.total AS total FROM payments p"
-        " JOIN orders o ON o.id = p.order_id WHERE p.order_id=?",
+        " JOIN orders o ON o.id = p.order_id WHERE p.order_id=%s",
         (order_id,),
     )
     if row is None:

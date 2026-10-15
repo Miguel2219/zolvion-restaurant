@@ -41,9 +41,9 @@ def _payments(since: str) -> dict:
     and the cancelled or rejected orders that still received money."""
     how_paid = {kind: {"kind": kind, "orders": 0, "received": 0} for kind in KINDS}
     overpaid = []
-    marks = ",".join("?" * len(COUNTED))
+    marks = ",".join(["%s"] * len(COUNTED))
     for row in db.q(
-        f"SELECT id, code FROM orders WHERE created_at >= ? AND state IN ({marks}) ORDER BY id",
+        f"SELECT id, code FROM orders WHERE created_at >= %s AND state IN ({marks}) ORDER BY id",
         (since, *COUNTED),
     ):
         pay = payments.current(row["id"])
@@ -56,9 +56,9 @@ def _payments(since: str) -> dict:
                 "surplus": pay["confirmed_overpayment"],
             })
     stopped = []
-    marks = ",".join("?" * len(STOPPED))
+    marks = ",".join(["%s"] * len(STOPPED))
     for row in db.q(
-        f"SELECT id, code, state FROM orders WHERE created_at >= ? AND state IN ({marks})"
+        f"SELECT id, code, state FROM orders WHERE created_at >= %s AND state IN ({marks})"
         " ORDER BY id",
         (since, *STOPPED),
     ):
@@ -78,12 +78,12 @@ def _payments(since: str) -> dict:
 
 def snapshot(days: int = 1) -> dict:
     since = _since(days)
-    marks = ",".join("?" * len(COUNTED))
+    marks = ",".join(["%s"] * len(COUNTED))
 
     totals = db.q1(
         f"""SELECT COUNT(*) AS orders, COALESCE(SUM(total),0) AS revenue,
                    COALESCE(SUM(delivery_fee),0) AS delivery_fees
-            FROM orders WHERE created_at >= ? AND state IN ({marks})""",
+            FROM orders WHERE created_at >= %s AND state IN ({marks})""",
         (since, *COUNTED),
     )
     orders_count = totals["orders"] or 0
@@ -92,7 +92,7 @@ def snapshot(days: int = 1) -> dict:
     by_state = {
         row["state"]: row["n"]
         for row in db.q(
-            "SELECT state, COUNT(*) AS n FROM orders WHERE created_at >= ? GROUP BY state",
+            "SELECT state, COUNT(*) AS n FROM orders WHERE created_at >= %s GROUP BY state",
             (since,),
         )
     }
@@ -102,7 +102,7 @@ def snapshot(days: int = 1) -> dict:
         for row in db.q(
             f"""SELECT oi.name AS name, SUM(oi.qty) AS units, SUM(oi.line_total) AS revenue
                 FROM order_items oi JOIN orders o ON o.id = oi.order_id
-                WHERE o.created_at >= ? AND o.state IN ({marks})
+                WHERE o.created_at >= %s AND o.state IN ({marks})
                 GROUP BY oi.name ORDER BY units DESC, revenue DESC LIMIT 5""",
             (since, *COUNTED),
         )
@@ -112,7 +112,7 @@ def snapshot(days: int = 1) -> dict:
         dict(row)
         for row in db.q(
             f"""SELECT fulfilment_type AS type, COUNT(*) AS n, COALESCE(SUM(total),0) AS revenue
-                FROM orders WHERE created_at >= ? AND state IN ({marks})
+                FROM orders WHERE created_at >= %s AND state IN ({marks})
                 GROUP BY fulfilment_type""",
             (since, *COUNTED),
         )
@@ -132,7 +132,7 @@ def snapshot(days: int = 1) -> dict:
     # revenue figure look wrong when orders were sitting unconfirmed.
     pending = db.q1(
         "SELECT COUNT(*) AS n, COALESCE(SUM(total),0) AS amount FROM orders"
-        " WHERE created_at >= ? AND state='PENDING_CONFIRMATION'",
+        " WHERE created_at >= %s AND state='PENDING_CONFIRMATION'",
         (since,),
     )
 

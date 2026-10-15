@@ -50,7 +50,7 @@ def check_signature(raw: bytes, header: str | None) -> bool:
 def _record(phone: str, body: str, status: str, error: str | None = None, kind: str = "text") -> None:
     db.run(
         "INSERT INTO outbound_messages(phone, body, kind, status, error, sent_at)"
-        " VALUES(?,?,?,?,?,?)",
+        " VALUES(%s,%s,%s,%s,%s,%s)",
         (phone, body, kind, status, error, db.now()),
     )
 

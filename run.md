@@ -20,6 +20,9 @@ python -m venv venv
 pip install -r requirements.txt
 ```
 
+PostgreSQL 17 must be running (Windows service `postgresql-x64-17`). The first time only,
+create its login and database: the command is in `docs/BUILD-AND-RUN.md` §2.
+
 The virtualenv on this laptop is `venv/` (it already exists; skip `python -m venv`).
 If PowerShell blocks the activate script, run once:
 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
@@ -61,7 +64,7 @@ signature is checked.
 5. Aceptar → Listo → Sale a domicilio → Entregado: the messages appear in the simulator
 6. Reports → sales, top item, payment split
 
-Then `python -m pytest tests -q` → **310 passed, 1 xfailed**. Full checks: `TEST.md`.
+Then `python -m pytest tests -q` → **308 passed, 1 xfailed**. Full checks: `TEST.md`.
 **If anything fails here, fix it now.** Do not move on to WhatsApp.
 
 ## Step 5 — Connect WhatsApp Cloud API (15 min)
@@ -165,7 +168,7 @@ Say this if he asks. Honesty buys more credibility than the demo itself.
 - No queue, no retries, no AWS. One process on your laptop.
 - No timers: carts do not expire, unanswered orders do not die.
 - Chat history is in memory: restarting uvicorn makes the bot forget the conversation.
-  Orders and reports survive (SQLite).
+  Orders and reports survive (PostgreSQL).
 - No staff login, no multi-branch, no printer.
 - The 10-minute "unaccepted order" alert will not fire in a 6-minute demo. To show it,
   open `/kitchen?alert=20`: it fires after 20 seconds.

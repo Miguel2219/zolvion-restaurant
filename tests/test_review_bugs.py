@@ -1,25 +1,17 @@
 """Task C2 Part 1: one test per defect of the 1 Oct review (docs/CURRENT-STATE.md §3).
 Each starts as a strict xfail that shows the bug; the mark goes when the bug is fixed."""
 import json
-import os
 import re
-import tempfile
 import types
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-os.environ.setdefault("DEMO_DB", os.path.join(tempfile.mkdtemp(), "review.sqlite3"))
+import pytest
 
-import pytest  # noqa: E402
-
-from app import brain, cart, db, main, orders, payments, wa  # noqa: E402
-from app.catalog import CATALOG  # noqa: E402
-from app.money import MoneyError, fmt, pesos  # noqa: E402
-
-REAL_DB = Path(__file__).resolve().parent.parent / "demo.sqlite3"
-if Path(db.DB_PATH).resolve() == REAL_DB.resolve():
-    pytest.exit("DEMO_DB points at the real demo.sqlite3; refusing to reset it", returncode=2)
+from app import brain, cart, db, main, orders, payments, wa
+from app.catalog import CATALOG
+from app.money import MoneyError, fmt, pesos
 
 PHONE = "573001112233"
 CASERITA = CATALOG.price_of("b_caserita")          # 18900
@@ -75,7 +67,7 @@ def _client(monkeypatch):
 
 def _last_outbound() -> str | None:
     row = db.q1(
-        "SELECT body FROM outbound_messages WHERE phone=? ORDER BY id DESC LIMIT 1", (PHONE,)
+        "SELECT body FROM outbound_messages WHERE phone=%s ORDER BY id DESC LIMIT 1", (PHONE,)
     )
     return row["body"] if row else None
 

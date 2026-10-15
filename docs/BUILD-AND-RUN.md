@@ -14,7 +14,7 @@ short reference.
 | Web server | FastAPI + uvicorn (Starlette) | fastapi 0.141.1, uvicorn 0.53.0, starlette 1.6.0 |
 | AI | Anthropic SDK (Claude, tool use + image input) | anthropic 1.7.0 |
 | HTTP client | httpx (WhatsApp Graph API v21.0) | 0.28.1 |
-| Database | SQLite (standard library), WAL mode | — |
+| Database | PostgreSQL 17 through psycopg 3 (autocommit, rows as dicts) | psycopg 3.3.6 (binary) |
 | Config | JSON file + `.env` via python-dotenv | python-dotenv 1.2.3 |
 | Front end | 3 static HTML pages, vanilla JS, no build | — |
 | Tests | pytest | 9.1.1 |
@@ -32,6 +32,18 @@ pip install -r requirements.txt
 copy .env.example .env      # then fill it in
 ```
 
+PostgreSQL 17 is installed on the laptop as the Windows service `postgresql-x64-17` on
+port 5432. Once, with the `postgres` password chosen at install time:
+
+```powershell
+& 'C:\Program Files\PostgreSQL\17\bin\psql.exe' -U postgres -h localhost -p 5432 -c "CREATE ROLE zolvion LOGIN PASSWORD 'zolvion' CREATEDB;" -c "CREATE DATABASE zolvion OWNER zolvion;"
+```
+
+The app creates its tables at startup (`db.init()`); the tests create `zolvion_test`.
+`zolvion`/`zolvion` is a local-only login. Without a local PostgreSQL,
+`docker compose up -d` starts one on port 5433 (`docker-compose.yml`; untested here:
+Docker Desktop 4.77 crashed on this laptop, 2026-10-14) and `DATABASE_URL` must say 5433.
+
 The virtualenv folder is `venv/` (ignored by git). If PowerShell blocks activation:
 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
@@ -47,7 +59,7 @@ The virtualenv folder is `venv/` (ignored by git). If PowerShell blocks activati
 | `WHATSAPP_APP_SECRET` | Checks Meta's webhook signature. Empty → the check is skipped |
 | `WHATSAPP_VERIFY_TOKEN` | Word for Meta's webhook handshake (default `zolvion-demo`) |
 | `RESTAURANT_CONFIG` | Config path (default `config/restaurant.json`) |
-| `DEMO_DB` | Database path (default `demo.sqlite3`) |
+| `DATABASE_URL` | PostgreSQL (default `postgresql://zolvion:zolvion@localhost:5432/zolvion`) |
 
 `.env` is read once at import. Restart after any change. Never commit it.
 
@@ -56,13 +68,14 @@ The virtualenv folder is `venv/` (ignored by git). If PowerShell blocks activati
 ```powershell
 uvicorn app.main:app --reload --port 8000
 
-python -m pytest tests -q                                    # all tests (310 pass, 1 xfail)
+python -m pytest tests -q                                    # all tests (308 pass, 1 xfail)
 python -m pytest tests -q -k wrong_amount                    # by name
 python -m pytest tests/test_flow.py::test_happy_path_pickup  # one test
 ```
 
 At startup the console prints whether the Anthropic key is present, whether WhatsApp is
-live or in simulator mode, and whether the webhook signature is verified. During a
+live or in simulator mode, whether the webhook signature is verified, and the database
+(host:port/name). No connection to PostgreSQL → the app does not start and says why. During a
 conversation it prints one line per tool call: `[bot ...1234] <tool> <args> -> <result>`.
 
 Pages: `http://localhost:8000/simulator`, `/kitchen` (also `/`), `/reports`.
@@ -71,10 +84,11 @@ Pages: `http://localhost:8000/simulator`, `/kitchen` (also `/`), `/reports`.
 ## 5. Tests
 
 - Two files: `tests/test_flow.py` (behaviour by area) and `tests/test_review_bugs.py`
-  (one or more tests per code-review defect R1–R12, `CURRENT-STATE.md` §3). Each sets
-  `DEMO_DB` to a temporary file **before** importing `app`; the database path is fixed at
-  import time. `test_review_bugs.py` refuses to run against the real `demo.sqlite3`.
-- An autouse fixture wipes every table between tests.
+  (one or more tests per code-review defect R1–R12, `CURRENT-STATE.md` §3).
+- `tests/conftest.py` runs first: it points `DATABASE_URL` at the same server with `_test`
+  added to the database name (`TEST_DATABASE_URL` overrides it), creates that database if
+  missing, and stops unless the name ends in `_test`. PostgreSQL must be running.
+- An autouse fixture wipes every table between tests (`db.reset()`).
 - No AI calls: tests call cart, order, payment, report and tool functions directly
   (`brain._run_tool`, `main.handle` with `extract_proof` and `reply` replaced), or replace
   the model with a scripted one (`_scripted`: fixed answers and tool calls, every call's
@@ -91,9 +105,9 @@ Pages: `http://localhost:8000/simulator`, `/kitchen` (also `/`), `/reports`.
   check, "Cómo pagaron").
 - Not covered: what the real AI decides (tool choice, wording). The Notion checklists and
   `TEST.md` test that by hand.
-- Result on 2026-10-13: 310 passed, 1 xfailed (the G16 expected failure in
-  `tests/test_review_bugs.py`), 3 deprecation warnings (two from `on_event`, one from
-  Starlette's test client).
+- Result on 2026-10-15 (PostgreSQL, Task D Part 1): 308 passed, 1 xfailed (the G16
+  expected failure in `tests/test_review_bugs.py`) in about 30 s, 3 deprecation warnings
+  (two from `on_event`, one from Starlette's test client).
 
 ## 6. Connecting real WhatsApp
 
