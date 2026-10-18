@@ -16,3 +16,5 @@ __pycache__/
 *.db
 *.db-*
 *.log
+# Real webhooks recorded in Task D step 0 (phone numbers, names, messages)
+recordings/

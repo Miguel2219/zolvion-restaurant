@@ -12,7 +12,7 @@ zolvion-restaurant-mvp
 ## Description (short field)
 
 WhatsApp ordering system for restaurants — the MVP Miguel demos and sells as a SaaS.
-One FastAPI process, SQLite, Claude with tool use, static kitchen panel.
+One FastAPI process, PostgreSQL, Claude with tool use, static kitchen panel.
 
 ## Instructions (long field — paste everything between the lines)
 
@@ -20,11 +20,11 @@ One FastAPI process, SQLite, Claude with tool use, static kitchen panel.
 
 This project is the MVP of Zolvion Restaurant: a WhatsApp ordering system for
 restaurants that Miguel demos to restaurant owners and sells as a SaaS. The code lives
-in the local folder `zolvion-demo` (Python, FastAPI, SQLite, the Anthropic API, the
-WhatsApp Cloud API, three static HTML pages). First prospect: Caseritas Burger,
-Bucaramanga. Tasks A, B, C and C2 Part 1 (code-review fixes) are done; C2 Part 2 (the
-"Pagos" block) is coded and waits for its manual checklist; Task D (Chatwoot) and a
-notifications bell are planned.
+in the local folder `zolvion-demo` (Python, FastAPI, PostgreSQL, the Anthropic API,
+WhatsApp through Chatwoot, two static HTML pages). Launch city: Ocaña (Norte de Santander);
+Caseritas Burger (Bucaramanga) is the test restaurant, not a prospect. Tasks A, B, C and
+C2 (Parts 1 and 2) and D (PostgreSQL, then WhatsApp through Chatwoot, where Zolvion is
+the Agent Bot) are done; a notifications bell is planned.
 
 Read README_1.md first. It maps every other document.
 

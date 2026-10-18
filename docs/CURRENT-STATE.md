@@ -1,16 +1,23 @@
 # Current state
 
-Snapshot: code last changed 2026-10-13 (two models: Haiku 5.5 chats, Sonnet 5.5 reads
-receipts; Sonnet 5.5 refused the forced `order_status` call that C2 Part 2 added, so an empty
-`ANTHROPIC_MODEL` now picks Haiku first, G34). Tests run 2026-10-13: 310 pass, 1 expected
-failure (G16). Notion checklists ✅: Task A 2026-09-23, Tasks B and C 2026-09-30, Task C2
-Part 1 2026-10-06, Task C2 Part 2 2026-10-11 (Bogotá time).
+Snapshot: code last changed 2026-10-17 on branch `feature/d-whatsapp-chatwoot`: Task D
+Part 2 connects WhatsApp through Chatwoot (Zolvion is the inbox's Agent Bot) and removes the
+simulator; Part 1 (2026-10-15) moved the database to PostgreSQL. Tests run 2026-10-18: 356
+pass, 1 expected failure (G16). Notion checklists ✅: Task A 2026-09-23, Tasks B and C
+2026-09-30, Task C2 Part 1 2026-10-06, Task C2 Part 2 2026-10-11, Task D Part 2 2026-10-18
+(16/16, local self-hosted Chatwoot, pure Cloud API number) (Bogotá time).
 
 ---
 
 ## 1. What works today
 
-### Customer side (WhatsApp, or the browser simulator)
+### Customer side (WhatsApp, through Chatwoot)
+
+- Several messages in a row get one answer: the bot waits `MESSAGE_WAIT_SECONDS` (4) after
+  the last one. A photo is answered on its own.
+- The bot answers only while the conversation is Pending in Chatwoot. Staff take over by
+  opening it or replying, and give it back with Pending or "Ya lo atendí"; the bot then reads
+  what was said meanwhile (`CHATWOOT-SETUP.md` §6).
 
 - Free-text questions and orders. The bot maps words to exact menu ids; code computes
   every line, subtotal, delivery fee and total. Items not on the menu are refused, never
@@ -56,19 +63,21 @@ Part 1 2026-10-06, Task C2 Part 2 2026-10-11 (Bogotá time).
 - "Registrar efectivo recibido": prefilled, capped at what is owed, one row per
   registration, no warning. Amount boxes read "22.400" and "$22.400" as $22.400 and refuse
   decimals.
-- Amber "🙋 Necesita a una persona" box with "Ya lo atendí".
+- Amber "🙋 Necesita a una persona" box with "Ya lo atendí". With Chatwoot it also hands
+  the conversation to a person there (private note, Open); «Chatwoot sin actualizar» while
+  that fails. "Ya lo atendí" gives it back to the bot first.
+- "ver conversación" on each card opens the order's conversation in Chatwoot.
 - Red pulse for a Nuevos order older than 600 s (`/kitchen?alert=20` for demos).
-- Green dot = WhatsApp connected; grey dot + banner = simulator mode.
+- Green dot + "WhatsApp por Chatwoot" (or "WhatsApp directo"); grey dot + banner = not
+  connected, or Chatwoot settings missing.
 - "Reiniciar demo" wipes **all** data (photos included) after a warning.
 
-### Reports (`/reports`) and simulator (`/simulator`)
+### Reports (`/reports`)
 
 - Reports for today (Bogotá calendar day), 7 or 30 days: sales, orders, average ticket,
   delivery fees, top 5 items, how they paid (by money that really came in), confirmed
   overpayments, payments on cancelled/rejected orders, pickup vs delivery, lost orders,
   orders waiting for the "sí", receipts flagged and awaiting (these two all time).
-- The simulator is a fake WhatsApp chat with image upload; the conversation is rebuilt
-  from the database; `?phone=` picks the number (default `573001112233`).
 
 ---
 
@@ -83,12 +92,14 @@ Each task has a Notion "Task X Plan" checklist that Miguel tests by hand (`WORKF
 | C | One row per receipt with its own checks, photo and Confirmar; database-checked reference for every receipt; resend vs reuse; Descartar with reason; cash capped at what is owed; surplus counts cash; cash settles an unspecified method; ESTADO REAL payment line (P-2465, P-0458, P-6455, P-4766 fixes) | Done: 40/40 ✅ (210 tests) |
 | C2 Part 1 | Fixes for the 1 Oct code review, R1–R12 and R3b (§3): cash counts toward what is owed by transfer, confirm message, a modifier added twice, non-text messages, Spanish errors, order creation in one transaction, replies cleaned of the order code and "cocina", stop instruction, last model call, amounts typed by staff. Follow-up (4 Oct): R2a and R7 failed the first manual run; the bot's payment text was fixed | Done: 18/18 ✅ (263 tests). Re-runs 4 and 6 Oct |
 | C2 Part 2 | "Pagos" block: one row per cash registration, ✕ to discard a receipt or cash (reason; a method only cash set goes back with the last cash row), no cash warning; code-built payment sentence copied verbatim and checked at the end of every turn (G29, G30, R1 wording; Gaps 1–7 decided 7 Oct); "Cómo pagaron" by money received (G27). Follow-up (8 and 13 Oct): two models, Haiku first when `ANTHROPIC_MODEL` is empty | Done: 8/8 ✅ 2026-10-11 (306 tests; 13 of the 21 planned rows left to automated tests) |
-| D | Planned. Chatwoot: a handoff opens a conversation a person answers in the same WhatsApp chat; the bot stays silent for that customer until the person closes it | Not started |
+| D | Integration only (decided 2026-10-14). Part 1: SQLite → PostgreSQL. Part 2: WhatsApp through a Chatwoot inbox (pure Cloud API or Coexistence; Chatwoot Cloud or self-hosted); Zolvion is its Agent Bot and answers only while a conversation is Pending; a handoff hands it to a person; consecutive messages answered together; a worker thread answers (webhooks only store); "ver conversación" on the card; simulator removed. Step 0 (16 Oct) recorded 84 real Chatwoot events | Part 1 coded 2026-10-15. Part 2: Done, 16/16 ✅ 2026-10-18 (356 tests) |
 | — | Planned as its own task: a notifications bell, so a customer with no card who asks for a person reaches someone | Not started |
+| — | Moved out of Task D (2026-10-14): staff editing an order from the panel, also after the restaurant accepted it | Not started |
+| — | After Task D: voice-note transcription, real handling of stickers and locations, more image handling, quoted replies, deploying to a server, a live Coexistence test | Not started |
 
 Task B rows about the "Llegó otro comprobante…" box and "Confirmar pago manualmente"
-describe behaviour that Task C replaced. Only what is written here is known about D and
-the bell; their scope is Miguel's decision.
+describe behaviour that Task C replaced. Only what is written here is known about the
+bell and the tasks after D; their scope is Miguel's decision.
 
 ---
 
@@ -98,7 +109,7 @@ Found by reading and probing the code on 2026-10-01; reproduced by hand on 2026-
 (Notion "Bug Check (code review 1 Oct)"); fixed in Task C2 Part 1; checked by hand after
 the fix in the Notion "Task C2 Plan (Part 1: bug fixes)" (2–6 Oct). Tests named below
 are in `tests/test_review_bugs.py`. "Automated only" = no manual row: nothing on the
-panel or in the simulator shows it.
+panel or on a phone shows it.
 
 | # | What happened before the fix | Where | Bug Check (2 Oct) | After the fix |
 |---|---|---|---|---|
@@ -121,10 +132,13 @@ panel or in the simulator shows it.
 ## 4. Tests
 
 `tests/test_flow.py`: Tasks A–C plus the C2 Part 2 section (cash rows and the ✕, Gaps 1–7,
-the payment sentence, the end-of-turn check with a scripted model, reports, schema, the two models), **257
-cases**, all passing. `tests/test_review_bugs.py` (Task C2 Part 1): one or more tests per
-defect of §3 plus the 4 Oct follow-up, **54 cases**: 53 pass, and
-`test_g16_order_code_loop_is_bounded` stays an expected failure (G16, out of scope).
-Together **310 passed, 1 xfailed** (2026-10-13; 3 deprecation warnings: two from FastAPI's
-`on_event`, one from Starlette's test client). No AI calls happen in tests. Areas:
+the payment sentence, the end-of-turn check with a scripted model, reports, schema, the two models), **255
+cases**, all passing (Task D Part 1 dropped 4 tests of the SQLite upgrade steps and added 2).
+`tests/test_review_bugs.py` (Task C2 Part 1): one or more tests per defect of §3 plus the
+4 Oct follow-up, **54 cases**: 53 pass, and `test_g16_order_code_loop_is_bounded` stays an
+expected failure (G16, out of scope); R5 and R9 now go through the worker.
+`tests/test_chatwoot.py` (Task D Part 2): **48 cases** on the Chatwoot integration, with
+recorded events and a fake Chatwoot. They run on PostgreSQL (`tests/conftest.py`).
+Together **356 passed, 1 xfailed** (2026-10-17; the warnings are FastAPI's `on_event` and
+one from Starlette's test client, G10). No AI calls happen in tests. Areas:
 `BUILD-AND-RUN.md` §5.

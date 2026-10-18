@@ -1,8 +1,9 @@
-"""WhatsApp Cloud API adapter.
+"""WhatsApp: every message to a customer leaves through send_text.
 
-If WHATSAPP_TOKEN is missing the adapter runs in FAKE mode: outbound messages are
-still recorded in the database, so the browser simulator shows them. That is what
-makes the demo survive a dead internet connection."""
+With Chatwoot configured (chatwoot.py) it goes through the restaurant's Chatwoot inbox;
+otherwise straight to the WhatsApp Cloud API. With neither (WHATSAPP_TOKEN empty) the
+adapter runs in FAKE mode: messages are only recorded in outbound_messages, which is
+how the tests read them."""
 
 import base64
 import hashlib
@@ -11,7 +12,7 @@ import os
 
 import httpx
 
-from . import db
+from . import chatwoot, db
 
 GRAPH = "https://graph.facebook.com/v21.0"
 
@@ -47,21 +48,47 @@ def check_signature(raw: bytes, header: str | None) -> bool:
     return hmac.compare_digest(expected, header.split("=", 1)[1])
 
 
-def _record(phone: str, body: str, status: str, error: str | None = None, kind: str = "text") -> None:
-    db.run(
-        "INSERT INTO outbound_messages(phone, body, kind, status, error, sent_at)"
-        " VALUES(?,?,?,?,?,?)",
-        (phone, body, kind, status, error, db.now()),
+def record(phone: str, body: str, status: str, conversation_id: int | None = None,
+           chatwoot_message_id: int | None = None) -> int:
+    """One outbound_messages row. Also used for what is never sent by Zolvion: a
+    SUPPRESSED reply and a STAFF message (a person's, in Chatwoot)."""
+    return db.insert(
+        "INSERT INTO outbound_messages(phone, body, kind, status, sent_at, conversation_id,"
+        " chatwoot_message_id) VALUES(%s,%s,'text',%s,%s,%s,%s) RETURNING id",
+        (phone, body, status, db.now(), conversation_id, chatwoot_message_id),
     )
 
 
-def send_text(phone: str, body: str) -> bool:
-    """Record first, then send (R9: a delivery record exists before any retry)."""
+def _settle(row_id: int, status: str, error: str | None = None, message_id: int | None = None) -> None:
+    db.run(
+        "UPDATE outbound_messages SET status=%s, error=%s, chatwoot_message_id=%s WHERE id=%s",
+        (status, error, message_id, row_id),
+    )
+
+
+def send_text(phone: str, body: str, conversation_id: int | None = None) -> bool:
+    """Record first, then send (R9: a delivery record exists before any retry).
+    `conversation_id`: the Chatwoot conversation the message answers; None means the
+    phone's newest one. Notifications go out even while a person has the conversation."""
     if not body:
         return False
-    if not live():
-        _record(phone, body, "FAKE")
+    if chatwoot.enabled():
+        conversation_id = conversation_id or chatwoot.conversation_for(phone)
+        row_id = record(phone, body, "SENDING", conversation_id)
+        if conversation_id is None:
+            _settle(row_id, "FAILED", "Este número no tiene conversación en Chatwoot.")
+            return False
+        try:
+            message_id = chatwoot.send(conversation_id, body[:4000])
+        except chatwoot.ChatwootError as exc:
+            _settle(row_id, "FAILED", str(exc)[:400])
+            return False
+        _settle(row_id, "SENT", message_id=message_id)
         return True
+    if not live():
+        record(phone, body, "FAKE")
+        return True
+    row_id = record(phone, body, "SENDING")
     payload = {
         "messaging_product": "whatsapp",
         "to": phone,
@@ -76,12 +103,12 @@ def send_text(phone: str, body: str) -> bool:
             timeout=20,
         )
         if response.status_code >= 300:
-            _record(phone, body, "FAILED", response.text[:400])
+            _settle(row_id, "FAILED", response.text[:400])
             return False
-        _record(phone, body, "SENT")
+        _settle(row_id, "SENT")
         return True
     except Exception as exc:  # noqa: BLE001
-        _record(phone, body, "FAILED", str(exc)[:400])
+        _settle(row_id, "FAILED", str(exc)[:400])
         return False
 
 

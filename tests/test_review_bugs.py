@@ -1,25 +1,17 @@
 """Task C2 Part 1: one test per defect of the 1 Oct review (docs/CURRENT-STATE.md §3).
 Each starts as a strict xfail that shows the bug; the mark goes when the bug is fixed."""
 import json
-import os
 import re
-import tempfile
 import types
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-os.environ.setdefault("DEMO_DB", os.path.join(tempfile.mkdtemp(), "review.sqlite3"))
+import pytest
 
-import pytest  # noqa: E402
-
-from app import brain, cart, db, main, orders, payments, wa  # noqa: E402
-from app.catalog import CATALOG  # noqa: E402
-from app.money import MoneyError, fmt, pesos  # noqa: E402
-
-REAL_DB = Path(__file__).resolve().parent.parent / "demo.sqlite3"
-if Path(db.DB_PATH).resolve() == REAL_DB.resolve():
-    pytest.exit("DEMO_DB points at the real demo.sqlite3; refusing to reset it", returncode=2)
+from app import brain, cart, db, main, orders, payments, wa, worker
+from app.catalog import CATALOG
+from app.money import MoneyError, fmt, pesos
 
 PHONE = "573001112233"
 CASERITA = CATALOG.price_of("b_caserita")          # 18900
@@ -75,7 +67,7 @@ def _client(monkeypatch):
 
 def _last_outbound() -> str | None:
     row = db.q1(
-        "SELECT body FROM outbound_messages WHERE phone=? ORDER BY id DESC LIMIT 1", (PHONE,)
+        "SELECT body FROM outbound_messages WHERE phone=%s ORDER BY id DESC LIMIT 1", (PHONE,)
     )
     return row["body"] if row else None
 
@@ -118,14 +110,18 @@ def _fake_model(monkeypatch, answer):
 
 
 def _webhook(monkeypatch, message):
-    """POST one WhatsApp message, in Meta's envelope, to /webhook."""
+    """POST one WhatsApp message, in Meta's envelope, to /webhook, and let the worker
+    answer it (the webhook only stores it)."""
     client = _client(monkeypatch)
     monkeypatch.setattr(wa, "check_signature", lambda raw, header: True)
+    monkeypatch.setenv("MESSAGE_WAIT_SECONDS", "0")
     payload = {"entry": [{"changes": [{"value": {
         "contacts": [{"wa_id": PHONE, "profile": {"name": "Ana"}}],
         "messages": [{"from": PHONE, "id": f"wamid.{uuid.uuid4().hex}", **message}],
     }}]}]}
-    return client.post("/webhook", json=payload)
+    response = client.post("/webhook", json=payload)
+    worker.run_once()
+    return response
 
 
 def _count(table: str) -> int:
@@ -425,14 +421,12 @@ def test_r8_total_is_checked_before_writing(monkeypatch):
 def test_r9_replies_never_carry_the_code_or_cocina(monkeypatch, case):
     order = _confirmed_order()
     if case == "chat":
-        client = _client(monkeypatch)
         _fake_model(
             monkeypatch, lambda kw: _text(f"Su pedido {order['code']} ya está en la cocina.")
         )
-        response = client.post("/sim/message", json={"phone": PHONE, "text": "¿cómo va?"})
+        response = _webhook(monkeypatch, {"type": "text", "text": {"body": "¿cómo va?"}})
         assert response.status_code == 200
         expected = "Su pedido ya está en el local."
-        assert response.json()["reply"] == expected
         assert _last_outbound() == expected
         assert brain._history[PHONE][-1]["content"][0]["text"] == expected
     else:

@@ -1027,6 +1027,13 @@ def _edit(phone: str, attempt: str, mutate=None, **delivery) -> str:
 
 
 def _run_tool(phone: str, name: str, args: dict) -> str:
+    """One tool call holds the write lock (db.write_lock): the panel writes from
+    another thread. Tools only touch the database, so it is held briefly."""
+    with db.write_lock:
+        return _run_tool_locked(phone, name, args)
+
+
+def _run_tool_locked(phone: str, name: str, args: dict) -> str:
     try:
         if name == "add_item":
             label = (CATALOG.item(args["item_id"]) or {}).get("name", args["item_id"])

@@ -5,19 +5,15 @@ moves. That is deliberate: if a price changes and a test fails, the test was
 right to fail."""
 
 import json
-import os
-import tempfile
 import types
 from datetime import datetime, timedelta
 from pathlib import Path
 
-os.environ.setdefault("DEMO_DB", os.path.join(tempfile.mkdtemp(), "t.sqlite3"))
+import pytest
 
-import pytest  # noqa: E402
-
-from app import brain, cart, db, handoff, orders, payments, reports, wa  # noqa: E402
-from app.catalog import CATALOG  # noqa: E402
-from app.money import MoneyError, fmt, pesos, total_of  # noqa: E402
+from app import brain, cart, db, handoff, orders, payments, reports, wa
+from app.catalog import CATALOG
+from app.money import MoneyError, fmt, pesos, total_of
 
 PHONE = "573001112233"
 CASERITA = CATALOG.price_of("b_caserita")          # 18900
@@ -181,7 +177,7 @@ def _transfer_order():
 def _order_created_ago(minutes: float) -> dict:
     """A confirmed transfer order whose created_at is `minutes` in the past."""
     order = _transfer_order()
-    db.run("UPDATE orders SET created_at=? WHERE id=?", (_iso(minutes), order["id"]))
+    db.run("UPDATE orders SET created_at=%s WHERE id=%s", (_iso(minutes), order["id"]))
     return orders.get(order["id"])
 
 
@@ -693,7 +689,7 @@ def test_cash_then_a_confirmed_transfer_is_a_surplus(monkeypatch):
     assert record["paid"] == total
     assert record["outstanding"] == 0
     last = db.q1(
-        "SELECT body FROM outbound_messages WHERE phone=? ORDER BY id DESC LIMIT 1", (PHONE,)
+        "SELECT body FROM outbound_messages WHERE phone=%s ORDER BY id DESC LIMIT 1", (PHONE,)
     )["body"]
     assert last == (
         f"Confirmamos su pago. Vimos que envió {fmt(transfer)} de más; "
@@ -853,7 +849,7 @@ def test_choosing_a_method_after_cash_goes_to_a_person():
     choosing one goes to a person."""
     order = _confirmed_order()
     db.run(                                          # a cash row that did not settle the method
-        "INSERT INTO cash_payments(order_id, amount, registered_at) VALUES(?,?,?)",
+        "INSERT INTO cash_payments(order_id, amount, registered_at) VALUES(%s,%s,%s)",
         (order["id"], ESPECIAL, db.now()),
     )
     result = brain._run_tool(PHONE, "choose_payment", {"method": "CASH"})
@@ -968,13 +964,6 @@ def test_locked_order_is_never_mutated_and_the_new_one_is_separate():
 
 # ---- the preparation step is gone (Task B) -----------------------------
 
-def test_legacy_preparation_rows_move_to_recibidos():
-    order = _accepted_order()
-    db.run("UPDATE orders SET state='IN_PREPARATION' WHERE id=?", (order["id"],))
-    db.init()
-    assert orders.get(order["id"])["state"] == "ACCEPTED"
-
-
 def test_ready_goes_back_to_recibidos():
     order = _accepted_order()
     order = orders.apply_event(order["id"], "food_ready")
@@ -1079,13 +1068,29 @@ def test_transaction_rolls_back_every_write():
     with pytest.raises(RuntimeError):
         with db.transaction():
             db.run(
-                "INSERT INTO conversations(phone, created_at) VALUES(?,?)",
+                "INSERT INTO conversations(phone, created_at) VALUES(%s,%s)",
                 ("tx-test-phone", db.now()),
             )
             raise RuntimeError("forced failure")
-    assert db.q1("SELECT 1 FROM conversations WHERE phone=?", ("tx-test-phone",)) is None
-    db.run("INSERT INTO conversations(phone, created_at) VALUES(?,?)", ("after-tx", db.now()))
-    assert db.q1("SELECT 1 FROM conversations WHERE phone=?", ("after-tx",)) is not None
+    assert db.q1("SELECT 1 FROM conversations WHERE phone=%s", ("tx-test-phone",)) is None
+    db.run("INSERT INTO conversations(phone, created_at) VALUES(%s,%s)", ("after-tx", db.now()))
+    assert db.q1("SELECT 1 FROM conversations WHERE phone=%s", ("after-tx",)) is not None
+
+
+def test_init_on_an_existing_database_keeps_its_rows():
+    """Every start runs init(): the schema is created only where it is missing."""
+    order = _pickup_order()
+    db.init()
+    assert orders.get(order["id"])["total"] == order["total"]
+
+
+def test_money_from_sql_sums_is_int():
+    """SUM() over INTEGER columns comes back as int; a Decimal would break money.py."""
+    payments.register_cash(_confirmed_order()["id"], 5000)
+    snapshot = reports.snapshot(1)
+    for key in ("revenue", "delivery_fees", "pending_amount", "average_ticket"):
+        assert type(snapshot[key]) is int, key
+    assert all(type(row["revenue"]) is int for row in snapshot["fulfilment"])
 
 
 def test_swap_is_add_then_remove():
@@ -1983,7 +1988,7 @@ def _discard_through_route(monkeypatch, model_text):
     assert response.status_code == 200
     assert response.json()["receipt"]["status"] == "DISCARDED"
     sent = [r["body"] for r in db.q(
-        "SELECT body FROM outbound_messages WHERE id>? ORDER BY id", (before,)
+        "SELECT body FROM outbound_messages WHERE id>%s ORDER BY id", (before,)
     )]
     return order, sent, history
 
@@ -2035,13 +2040,6 @@ def test_discard_reason_is_on_the_board(monkeypatch):
     found = card["payment"]["receipts"][0]
     assert found["status"] == "DISCARDED"
     assert found["discard_reason"] == DISCARD_REASON              # stored trimmed
-
-
-def test_discard_reason_column_is_added_to_an_old_database():
-    db.run("ALTER TABLE payment_receipts DROP COLUMN discard_reason")
-    db.init()
-    columns = {row["name"] for row in db.q("PRAGMA table_info(payment_receipts)")}
-    assert "discard_reason" in columns
 
 
 def test_real_state_shows_a_discarded_receipt_as_discarded():
@@ -2113,7 +2111,7 @@ def test_confirm_route_sends_the_code_built_message(monkeypatch):
     )
     assert response.status_code == 200
     last = db.q1(
-        "SELECT body FROM outbound_messages WHERE phone=? ORDER BY id DESC LIMIT 1", (PHONE,)
+        "SELECT body FROM outbound_messages WHERE phone=%s ORDER BY id DESC LIMIT 1", (PHONE,)
     )
     assert last["body"].startswith("Confirmamos")
     bad = client.post(f"/api/orders/{order['id']}/receipts/999999/confirm", json={})
@@ -2154,43 +2152,6 @@ def test_reset_removes_receipts_and_photos():
     db.reset()
     assert db.q1("SELECT COUNT(*) AS n FROM payment_receipts")["n"] == 0
     assert db.q1("SELECT COUNT(*) AS n FROM receipt_photos")["n"] == 0
-
-
-def test_legacy_payment_becomes_the_first_receipt():
-    """A database from before Task C: each stored payment becomes its order's first
-    receipt, once."""
-    def legacy(status, reference, cash_received=0, overpayment=0):
-        order = _pickup_order()
-        db.run(
-            "UPDATE payments SET status=?, method='TRANSFER', transfer_amount=?, cash_received=?,"
-            " overpayment_amount=?, proof_reference=?, flags='[]', notes='[]', extracted=?"
-            " WHERE order_id=?",
-            (status, ESPECIAL, cash_received, overpayment, reference,
-             json.dumps({"amount": ESPECIAL, "reference": reference}), order["id"]),
-        )
-        return order["id"]
-
-    x = legacy("CONFIRMED", "OLD-1", overpayment=1000)                    # no cash ever registered
-    y = legacy("CONFIRMED", "OLD-2", cash_received=5000, overpayment=1000)
-    z = legacy("PROOF_RECEIVED", "OLD-3")
-    # The old unique index came with the old schema; init() must drop it.
-    db.run("CREATE UNIQUE INDEX payments_reference_unique"
-           " ON payments(proof_reference) WHERE proof_reference IS NOT NULL")
-    db.init()
-
-    rows = {order_id: payments.receipts(order_id) for order_id in (x, y, z)}
-    assert all(len(found) == 1 for found in rows.values())
-    assert rows[x][0]["status"] == "CONFIRMED"
-    assert rows[x][0]["confirmed_amount"] == ESPECIAL + 1000              # the surplus is all transfer
-    assert rows[x][0]["reference"] == "OLD-1"
-    assert rows[y][0]["confirmed_amount"] == ESPECIAL                     # cash makes it unknowable: dropped
-    assert rows[z][0]["status"] == "PROOF_RECEIVED"
-    assert not any(found[0]["has_photo"] for found in rows.values())
-
-    db.init()                                                             # a second start
-    assert db.q1("SELECT COUNT(*) AS n FROM payment_receipts")["n"] == 3
-    indexes = {row["name"] for row in db.q("PRAGMA index_list(payments)")}
-    assert "payments_reference_unique" not in indexes
 
 
 def test_reports_count_receipts():
@@ -2692,7 +2653,7 @@ def _notified(order_id, event, reason=None):
     order = orders.apply_event(order_id, event, reason)
     main.notify(order, reason)
     return [r["body"] for r in db.q(
-        "SELECT body FROM outbound_messages WHERE id>? ORDER BY id", (before,)
+        "SELECT body FROM outbound_messages WHERE id>%s ORDER BY id", (before,)
     )]
 
 
@@ -3331,14 +3292,6 @@ def test_report_lists_rejected_orders_with_money_apart():
                  "Pagos de pedidos cancelados/rechazados", "Pagos registrados",
                  "este reporte no registra devoluciones"):
         assert text in html
-
-
-def test_cash_table_and_method_column_reach_an_old_database():
-    db.run("DROP TABLE cash_payments")
-    db.run("ALTER TABLE payments DROP COLUMN method_from_cash")
-    db.init()
-    assert {row["name"] for row in db.q("PRAGMA table_info(payments)")} >= {"method_from_cash"}
-    assert db.q1("SELECT name FROM sqlite_master WHERE name='cash_payments'") is not None
 
 
 def test_reset_wipes_cash_rows():

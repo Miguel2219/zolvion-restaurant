@@ -12,7 +12,7 @@ Path: `RESTAURANT_CONFIG` env var, default `config/restaurant.json`.
 
 | Key | Contents | Used by code? |
 |---|---|---|
-| `business.name`, `short_name` | Panel titles, simulator header, startup banner | Yes |
+| `business.name`, `short_name` | Panel titles, startup banner | Yes |
 | `business.city`, `currency` | Descriptive | Not read by code |
 | `business.timezone` | `America/Bogota`. "Today" in reports and receipt dates. Falls back to UTC−5 if timezone data is missing (Windows without `tzdata`) | Yes |
 | `business.persona` | First paragraph of the bot's system prompt: tone, *usted*, what comes with every burger | Yes (prompt) |
@@ -70,7 +70,8 @@ Values still to confirm with the restaurant (`run.md`, `TEST.md`):
 4. Run the automated tests. Expected numbers are read from the config, so a price change
    moves the tests on purpose. Tests use fixed ids (`b_caserita`, `b_especial`,
    `d_gaseosa_personal`, …), so a different menu needs the tests adjusted.
-5. Run `TEST.md` Part A in the simulator before connecting WhatsApp.
+5. Connect its WhatsApp number through Chatwoot (`CHATWOOT-SETUP.md`) and run `TEST.md`
+   Part A from a phone.
 
 One process serves one config. Several restaurants means several processes, each with
 its own config, database and WhatsApp number (`KNOWN-GAPS.md` G21).

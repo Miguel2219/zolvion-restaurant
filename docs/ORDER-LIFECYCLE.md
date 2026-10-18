@@ -95,10 +95,16 @@ Details:
   nothing for later, and no box appears.
 - "Quiero hablar con una persona" with no reason: the bot asks the reason once. If a tool
   covers it, that tool runs; otherwise, or if the customer won't say, `OTHER`.
-- "Ya lo atendí" resolves every open request on that order; nothing is sent. The bot
-  keeps answering while a box is open; staff contact the customer by hand.
-- Task D (planned) moves this into Chatwoot and silences the bot until the person
-  closes it.
+- With Chatwoot (Task D Part 2) the box also hands the conversation to a person there:
+  after the bot's reply went out, Chatwoot gets a private note with the summary and the
+  order code and the conversation moves to Open; the bot stays quiet while it is Open.
+  If Chatwoot fails, the card says «Chatwoot sin actualizar» and the worker retries every
+  30 s (the bot keeps answering until then). Pending or resolved in Chatwoot closes the box.
+- "Ya lo atendí" resolves every open request on that order; nothing is sent to the
+  customer. With Chatwoot it first sets the conversation to Pending; if that fails the box
+  stays (502). Without Chatwoot the bot keeps answering while a box is open.
+- Staff can also take any conversation in Chatwoot without a box (open it, or reply on a
+  Pending one), and give it back with Pending (`CHATWOOT-SETUP.md` §6).
 
 ## 5. Who gets told what
 

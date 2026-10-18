@@ -22,9 +22,10 @@ references in its comments mean.
    message keeps its own template guard.
 4. **Uniqueness lives in the database, not in Python.** A repeated WhatsApp message id
    and a reused receipt reference are rejected by constraints; code decides resend vs.
-   reuse only after the `IntegrityError`. `db.run()` rolls back on failure so the thread
-   never keeps SQLite's write lock. `db.transaction()` groups writes that must land
-   together; code inside it must not catch a failed write and carry on.
+   reuse only after the `IntegrityError` (`db.IntegrityError`). Outside a transaction a
+   failed `db.run()` leaves nothing behind (autocommit). `db.transaction()` groups writes
+   that must land together; code inside it must not catch a failed write and carry on:
+   PostgreSQL has aborted the transaction, and every later statement in it fails.
 5. **Money is `int` pesos.** Never a float. `money.pesos()` refuses floats and bools;
    `money.fmt()` prints `$47.300`. `payments.current()` is the only place that computes
    paid, owed and surplus.
@@ -37,8 +38,9 @@ references in its comments mean.
    `order_transitions`. That table is never updated or deleted from (except the reset).
 9. **Staff reject/cancel, receipt discards and cash discards need a reason.** The customer
    receives it for the first three; a cash discard tells nobody and the reason stays on the row.
-10. **Webhook signature is checked on the raw body before anything else** (when
-    `WHATSAPP_APP_SECRET` is set).
+10. **Webhook signature is checked on the raw body before anything else**: always for
+    Chatwoot (`chatwoot.verify`, signed timestamp within 5 minutes); for Meta when
+    `WHATSAPP_APP_SECRET` is set. A webhook only stores what arrived; the worker answers.
 11. **The system decides, not the model.** Whether a change edits the order or goes to a
     person is decided in code by the order's column (`_edit`, the `request_handoff`
     topic gate). The order's and payment's state reach the model from ESTADO REAL on
@@ -80,7 +82,8 @@ fixed template fallback.
 
 ### Tests
 
-- Set `DEMO_DB` before importing `app`. Read expected prices from `CATALOG`.
+- `tests/conftest.py` picks the `_test` database before `app` is imported. Read expected
+  prices from `CATALOG`.
 - New behaviour gets a test in `tests/test_flow.py`; a code-review defect gets one in
   `tests/test_review_bugs.py`, named after it (`test_r7_…`). The suite must stay green.
 

@@ -1,22 +1,22 @@
-"""The whole demo in one process: webhook in, kitchen and reports out.
+"""The MVP in one process: WhatsApp in (through Chatwoot, or straight from Meta),
+kitchen panel and reports out.
 
-This is deliberately not the real architecture. No queue, no worker, no AWS —
-the real design lives in the zolvion-restaurant repo. This file exists to make a
-convincing six-minute demo, nothing more."""
+The webhooks only store what arrived; worker.py answers it. Not the target
+architecture (queue, worker service, AWS): that lives in the zolvion-restaurant repo."""
 
 import base64
-import uuid
+import json
 import os
 import re
-import sqlite3
 import traceback
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import brain, cart, db, handoff, orders, payments, reports, wa
+from . import brain, chatwoot, db, handoff, orders, payments, reports, wa, worker
 from .catalog import CATALOG, reload as reload_catalog
 from .money import fmt
 
@@ -26,27 +26,56 @@ app = FastAPI(title="Zolvion demo")
 db.init()
 
 
+def channel() -> str:
+    """How customers reach the bot: chatwoot, whatsapp (Meta directly), none (FAKE: no
+    message leaves) or incomplete (some Chatwoot settings missing: nothing works)."""
+    if chatwoot.incomplete():
+        return "incomplete"
+    if chatwoot.enabled():
+        return "chatwoot"
+    return "whatsapp" if wa.live() else "none"
+
+
 @app.on_event("startup")
 def _startup_check() -> None:
     """Say out loud what is and is not configured, before the first message
     arrives instead of after it fails."""
     key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
     chat_model, proof_model = brain.model_names()
+    way = channel()
+    whatsapp = {
+        "chatwoot": f"por Chatwoot ({chatwoot.base_url()}, cuenta "
+                    f"{chatwoot.setting('CHATWOOT_ACCOUNT_ID')})",
+        "whatsapp": "conectado directo (Meta)",
+        "none": "sin conexión: los mensajes al cliente no salen",
+        "incomplete": f"FALTA {', '.join(chatwoot.missing())}  -> revisa .env y reinicia",
+    }[way]
+    signature = (
+        "verificando (secreto del bot de Chatwoot)" if way == "chatwoot"
+        else "verificando" if wa.app_secret() else "sin APP_SECRET (no verifica)"
+    )
     lines = [
         "",
         "  " + CATALOG.business["name"] + "  —  demo",
         f"  Anthropic key : {'OK' if key else 'FALTA  -> revisa .env y reinicia'}",
         f"  Conversación  : {chat_model}",
         f"  Comprobantes  : {proof_model}",
-        f"  WhatsApp      : {'conectado' if wa.live() else 'modo simulador'}",
-        f"  Firma webhook : {'verificando' if wa.app_secret() else 'sin APP_SECRET (no verifica)'}",
+        f"  WhatsApp      : {whatsapp}",
+        f"  Firma webhook : {signature}",
+        f"  Espera        : {worker.wait_seconds():g} s después del último mensaje",
+        f"  Base de datos : PostgreSQL {db.describe()}",
         "",
-        "  Simulador  http://localhost:8000/simulator",
         "  Cocina     http://localhost:8000/kitchen",
         "  Reportes   http://localhost:8000/reports",
-        "",
     ]
-    print("\n".join(lines), flush=True)
+    if way == "chatwoot":
+        lines.append("  Webhook del Agent Bot: <dirección de Zolvion>/chatwoot/webhook")
+    print("\n".join(lines + [""]), flush=True)
+
+
+@app.on_event("startup")
+def _start_worker() -> None:
+    worker.start()
 
 
 # ---- customer-facing notifications ----------------------------------
@@ -287,11 +316,32 @@ def _note_for(message: dict, image_failed: bool) -> str | None:
     return None
 
 
+# The API refuses an empty message; the model still has to answer something.
+EMPTY_MESSAGE_NOTE = (
+    "(El cliente envió un mensaje sin texto. Pregúntale con amabilidad en qué "
+    "le puedes ayudar.)"
+)
+
+
+def receive_receipt(order: dict, image: dict, received_at: str | None) -> dict:
+    """A receipt image for `order`: the model only reads it, code gives the verdict
+    (payments.check_proof). No conversation: the worker also calls this while a person
+    has the conversation in Chatwoot."""
+    extracted = brain.extract_proof(image)          # model: OCR only
+    src = image.get("source") or {}
+    photo = (
+        (base64.b64decode(src["data"]), src.get("media_type") or "image/jpeg")
+        if src.get("data") else None
+    )
+    with db.write_lock:                             # code: the verdict
+        return payments.check_proof(order["id"], extracted, photo=photo, received_at=received_at)
+
+
 def handle(
     phone: str, text: str | None, image: dict | None, received_at: str | None = None,
     customer: bool = True,
 ) -> str:
-    """Returns the reply text. Caller decides how to deliver it.
+    """Returns the reply text. Caller decides how to deliver it (worker._deliver).
 
     `received_at` is when the message actually arrived (both webhook handlers
     stamp inbound_messages with it) - the reference point for the proof's date
@@ -300,33 +350,18 @@ def handle(
     customer's words: only the customer's words can be a payment question."""
     if image is None:
         if not (text or "").strip():
-            # The API refuses an empty message; the model still has to answer something.
-            text = (
-                "(El cliente envió un mensaje sin texto. Pregúntale con amabilidad en qué "
-                "le puedes ayudar.)"
-            )
+            text = EMPTY_MESSAGE_NOTE
             customer = False
         return brain.reply(phone, text, customer=customer)
 
-    order = orders.latest_for(
-        phone,
-        ["PENDING_CONFIRMATION", "CONFIRMED", "ACCEPTED", "READY", "OUT_FOR_DELIVERY"],
-    )
+    order = orders.latest_for(phone, [*orders.EDITABLE, *orders.LOCKED])
     if order is None:
         return brain.reply(
             phone,
             [image, {"type": "text", "text": "(el cliente envió una imagen y no tiene pedido activo)"}],
         )
 
-    extracted = brain.extract_proof(image)          # model: OCR only
-    src = image.get("source") or {}
-    photo = (
-        (base64.b64decode(src["data"]), src.get("media_type") or "image/jpeg")
-        if src.get("data") else None
-    )
-    record = payments.check_proof(
-        order["id"], extracted, photo=photo, received_at=received_at
-    )                                               # code: the verdict
+    record = receive_receipt(order, image, received_at)
 
     if record["resent"] and record.get("resent_discard_reason"):
         return _resent_discarded_message(order, record["resent_discard_reason"])
@@ -366,10 +401,22 @@ def handle(
     ), with_payment=True, action=brain.RECEIPT_ACTION)
 
 
-# ---- WhatsApp webhook -----------------------------------------------
+# ---- incoming messages ----------------------------------------------
+#
+# Both webhooks only store what arrived and answer at once; worker.py answers the
+# customer. With Chatwoot configured the Meta webhook is off (Meta talks to Chatwoot).
+
+def _incomplete_setup() -> JSONResponse:
+    return JSONResponse(
+        {"error": f"Falta configurar Chatwoot: {', '.join(chatwoot.missing())}."},
+        status_code=503,
+    )
+
 
 @app.get("/webhook")
 def verify(request: Request):
+    if chatwoot.enabled() or chatwoot.incomplete():
+        return Response(status_code=404)
     params = request.query_params
     if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == wa.verify_token():
         return Response(content=params.get("hub.challenge", ""), media_type="text/plain")
@@ -378,144 +425,142 @@ def verify(request: Request):
 
 @app.post("/webhook")
 async def inbound(request: Request):
+    if chatwoot.incomplete():
+        return _incomplete_setup()
+    if chatwoot.enabled():
+        return Response(status_code=404)
     raw = await request.body()
     if not wa.check_signature(raw, request.headers.get("x-hub-signature-256")):
         return Response(status_code=403)          # rejected before any side effect
 
     try:
-        payload = await request.json()
-    except Exception:  # noqa: BLE001
+        payload = json.loads(raw)
+    except ValueError:
         return {"ok": True}
 
-    for message in wa.parse_webhook(payload):
-        wa_id = message.get("wa_message_id")
-        phone = message.get("phone")
-        if not wa_id or not phone:
-            continue
-        received_at = db.now()
-        try:
-            db.run(
-                "INSERT INTO inbound_messages(wa_message_id, phone, body, kind, received_at)"
-                " VALUES(?,?,?,?,?)",
-                (wa_id, phone, message.get("text"), message.get("kind", "text"), received_at),
-            )
-        except sqlite3.IntegrityError:
-            continue                              # duplicate delivery: exactly one row
-        if message.get("kind") == "reaction":
-            continue                              # an emoji on a message needs no answer
-
-        image = None
-        image_failed = False
-        if message.get("media_id"):
-            downloaded = wa.download_media(message["media_id"])
-            if downloaded:
-                image = wa.image_block(*downloaded)
-            else:
-                image_failed = True
-        # Not text the bot can read: it gets a note instead of the (empty) text.
-        note = _note_for(message, image_failed)
-        text = note or message.get("text")
-        try:
-            reply = handle(phone, text, image, received_at, customer=note is None)
-        except brain.NotConfigured as exc:
-            print(f"\n!! {exc}\n", flush=True)
-            reply = "Perdón, el sistema está en mantenimiento. Intente en unos minutos."
-        except Exception:  # noqa: BLE001
-            traceback.print_exc()
-            reply = "Perdón, se me cruzaron los cables. ¿Me repite el pedido?"
-        wa.send_text(phone, _customer_safe(phone, reply))
-
+    with db.write_lock:
+        for message in wa.parse_webhook(payload):
+            wa_id = message.get("wa_message_id")
+            phone = message.get("phone")
+            if not wa_id or not phone:
+                continue
+            media = message.get("media_id")
+            try:
+                db.run(
+                    "INSERT INTO inbound_messages(wa_message_id, phone, body, kind, received_at,"
+                    " status, media_url, location) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (
+                        wa_id, phone, message.get("text"), message.get("kind") or "text",
+                        db.now(),
+                        # An emoji on a message needs no answer.
+                        "DONE" if message.get("kind") == "reaction" else "RECEIVED",
+                        f"whatsapp:{media}" if media else None,
+                        json.dumps(message["location"]) if message.get("location") else None,
+                    ),
+                )
+            except db.IntegrityError:
+                continue                          # duplicate delivery: exactly one row
     return {"ok": True}
 
 
-# ---- browser simulator (Plan B) -------------------------------------
-
-@app.post("/sim/message")
-async def sim_message(request: Request):
-    body = await request.json()
-    phone = str(body.get("phone") or "573000000000")
-    text = body.get("text")
-    image = None
-    data_url = body.get("image")
-    if data_url:
-        header, _, encoded = data_url.partition(",")
-        mime = header.split(":", 1)[-1].split(";", 1)[0] or "image/jpeg"
-        image = wa.image_block(base64.b64decode(encoded), mime)
-
-    # Store it exactly like a real inbound message, so the conversation survives
-    # leaving the page. The image itself is not kept, only that one was sent.
-    received_at = db.now()
-    db.run(
-        "INSERT INTO inbound_messages(wa_message_id, phone, body, kind, received_at)"
-        " VALUES(?,?,?,?,?)",
-        (
-            f"sim-{uuid.uuid4().hex}", phone,
-            text or ("📎 comprobante" if image else ""),
-            "image" if image else "text", received_at,
-        ),
-    )
+@app.post("/chatwoot/webhook")
+async def chatwoot_webhook(request: Request):
+    """The Agent Bot's webhook. No slow work here: past 5 s, or on an error, Chatwoot
+    opens the conversation for a person and never sends the event again. So after the
+    signature everything answers 200, even when storing failed (it is logged)."""
+    if chatwoot.incomplete():
+        return _incomplete_setup()
+    if not chatwoot.enabled():
+        return Response(status_code=404)
+    raw = await request.body()
+    headers = request.headers
+    if not chatwoot.verify(raw, headers.get("x-chatwoot-timestamp"),
+                           headers.get("x-chatwoot-signature")):
+        return Response(status_code=401)          # rejected before any side effect
     try:
-        reply = handle(phone, text, image, received_at)
-    except brain.NotConfigured as exc:
-        print(f"\n!! {exc}\n", flush=True)
-        return JSONResponse({"error": str(exc)}, status_code=503)
-    except Exception as exc:  # noqa: BLE001
+        payload = json.loads(raw)
+        with db.write_lock:
+            _chatwoot_event(payload)
+    except Exception:  # noqa: BLE001 - see the docstring
         traceback.print_exc()
-        return JSONResponse({"error": str(exc)}, status_code=500)
-    reply = _customer_safe(phone, reply)
-    wa.send_text(phone, reply)
-    return {"reply": reply}
+    return {"ok": True}
 
 
-@app.get("/sim/outbound")
-def sim_outbound(phone: str, after: int = 0):
-    rows = db.q(
-        "SELECT id, body, status, sent_at FROM outbound_messages"
-        " WHERE phone=? AND id>? ORDER BY id",
-        (phone, after),
+def _chatwoot_event(payload: dict) -> None:
+    """One event, sorted by chatwoot.classify. Every event that carries a conversation
+    updates its status first; Pending or resolved closes the amber box."""
+    kind = chatwoot.classify(payload)
+    if kind in ("own", "ignore"):
+        return
+    state = chatwoot.conversation_state(payload)
+    phone = state["phone"]
+    status = chatwoot.remember(
+        phone, state["conversation_id"], state["status"], state["status_at"], state["name"]
     )
-    return {"messages": [dict(r) for r in rows]}
+    if status == chatwoot.PENDING:
+        handoff.close_for_phone(phone, ("OPEN",))
+    elif status == "resolved":
+        handoff.close_for_phone(phone, ("OPENING", "OPEN"))
 
+    if kind == "customer":
+        message = chatwoot.parse_customer(payload)
+        if not phone:
+            return
+        try:
+            db.run(
+                "INSERT INTO inbound_messages(wa_message_id, phone, body, kind, received_at,"
+                " status, conversation_id, media_url, location)"
+                " VALUES(%s,%s,%s,%s,%s,'RECEIVED',%s,%s,%s)",
+                (
+                    message["wa_message_id"], phone, message["text"], message["kind"],
+                    db.now(), message["conversation_id"], message["media_url"],
+                    json.dumps(message["location"]) if message["location"] else None,
+                ),
+            )
+        except db.IntegrityError:
+            pass                                  # duplicate delivery: exactly one row
+        return
 
-@app.get("/sim/conversation")
-def sim_conversation(phone: str):
-    """The whole thread, both directions. The simulator loads this on open, so
-    switching to the panel and coming back no longer loses what you typed."""
-    thread = [
-        {"role": "customer", "body": row["body"], "at": row["received_at"], "id": 0}
-        for row in db.q(
-            "SELECT body, received_at FROM inbound_messages WHERE phone=? ORDER BY rowid",
-            (phone,),
-        )
-    ] + [
-        {"role": "bot", "body": row["body"], "at": row["sent_at"], "id": row["id"]}
-        for row in db.q(
-            "SELECT id, body, sent_at FROM outbound_messages WHERE phone=? ORDER BY id",
-            (phone,),
-        )
-    ]
-    # Same second: the customer's message comes before the reply to it.
-    thread.sort(key=lambda m: (m["at"], m["role"] == "bot"))
-    return {
-        "messages": thread,
-        "last_bot_id": max((m["id"] for m in thread if m["role"] == "bot"), default=0),
-    }
+    if kind == "staff" and status is not None:
+        # A person wrote to the customer (in Chatwoot, or from the restaurant's phone
+        # app under Coexistence). Kept for the bot's catch-up note; while the bot held
+        # the conversation, it is a takeover.
+        try:
+            wa.record(phone, payload.get("content") or "(archivo adjunto)", "STAFF",
+                      state["conversation_id"], payload.get("id"))
+        except db.IntegrityError:
+            return                                # duplicate delivery, or Zolvion's own message
+        if status == chatwoot.PENDING:
+            chatwoot.set_local(phone, chatwoot.OPEN, push=True)
 
 
 # ---- panel API -------------------------------------------------------
 
+# Panel routes: every write holds db.write_lock (the worker writes too). What waits on
+# the model or on Chatwoot runs in a thread, so the server keeps answering webhooks
+# inside Chatwoot's 5 s meanwhile.
+
 @app.get("/api/config")
 def config():
+    way = channel()
     return {
         "business": CATALOG.business,
-        "live_whatsapp": wa.live(),
+        "live_whatsapp": way in ("chatwoot", "whatsapp"),
+        "channel": way,
+        "missing": chatwoot.missing() if way == "incomplete" else [],
         "accounts": CATALOG.accounts(),
     }
 
 
 @app.get("/api/board")
 def board():
-    return {"orders": orders.board()}
+    found = orders.board()
+    for order in found:
+        # The conversation the order was made in; an older order, the phone's newest.
+        order["chatwoot_link"] = chatwoot.link(
+            order.get("chatwoot_conversation_id") or chatwoot.conversation_for(order["phone"])
+        )
+    return {"orders": found}
 
 
 NEEDS_REASON = {"staff_rejects", "staff_cancels"}
@@ -531,20 +576,38 @@ async def order_event(order_id: int, request: Request):
             {"error": "Hace falta el motivo para avisarle al cliente."}, status_code=400
         )
     try:
-        order = orders.apply_event(order_id, event, reason or None)
+        with db.write_lock:
+            order = orders.apply_event(order_id, event, reason or None)
     except orders.IllegalTransition as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
-    notify(order, reason or None)
+    await run_in_threadpool(notify, order, reason or None)
     return order
+
+
+RETURN_FAILED = "No se pudo devolver la conversación al bot en Chatwoot. Intente de nuevo."
 
 
 @app.post("/api/orders/{order_id}/handoff/resolve")
 async def resolve_handoff(order_id: int):
-    handoff.resolve(order_id)
+    """"Ya lo atendí". With Chatwoot the conversation goes back to Pending first, and
+    only then the box closes: a box that closed while Chatwoot still shows a person
+    would leave the customer with nobody answering."""
     try:
-        return orders.get(order_id)
+        order = orders.get(order_id)
     except KeyError:
         return JSONResponse({"error": "Pedido no encontrado."}, status_code=404)
+    conversation_id = chatwoot.conversation_for(order["phone"]) if chatwoot.enabled() else None
+    if conversation_id is not None and handoff.in_chatwoot(order_id):
+        try:
+            await run_in_threadpool(chatwoot.set_status, conversation_id, chatwoot.PENDING)
+        except chatwoot.ChatwootError:
+            traceback.print_exc()
+            return JSONResponse({"error": RETURN_FAILED}, status_code=502)
+        with db.write_lock:
+            chatwoot.set_local(order["phone"], chatwoot.PENDING)
+    with db.write_lock:
+        handoff.resolve(order_id)
+    return orders.get(order_id)
 
 
 def _payment_confirm_message(record: dict) -> str:
@@ -590,11 +653,12 @@ def _payment_confirm_message(record: dict) -> str:
 async def confirm_receipt(order_id: int, receipt_id: int, request: Request):
     body = await request.json()
     try:
-        record = payments.confirm_receipt(order_id, receipt_id, body.get("amount"))
+        with db.write_lock:
+            record = payments.confirm_receipt(order_id, receipt_id, body.get("amount"))
     except payments.PaymentError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     order = orders.get(order_id)
-    wa.send_text(order["phone"], _payment_confirm_message(record))
+    await run_in_threadpool(wa.send_text, order["phone"], _payment_confirm_message(record))
     return record
 
 
@@ -608,11 +672,16 @@ async def discard_receipt(order_id: int, receipt_id: int, request: Request):
         body = {}
     reason = body.get("reason") if isinstance(body, dict) else None
     try:
-        record = payments.discard_receipt(order_id, receipt_id, reason)
+        with db.write_lock:
+            record = payments.discard_receipt(order_id, receipt_id, reason)
     except payments.PaymentError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     order = orders.get(order_id)
-    wa.send_text(order["phone"], _discard_message(order, record["receipt"]["discard_reason"]))
+
+    def tell() -> None:
+        wa.send_text(order["phone"], _discard_message(order, record["receipt"]["discard_reason"]))
+
+    await run_in_threadpool(tell)
     return record
 
 
@@ -629,7 +698,8 @@ def receipt_photo(receipt_id: int):
 async def register_cash(order_id: int, request: Request):
     body = await request.json()
     try:
-        record = payments.register_cash(order_id, body.get("amount"))
+        with db.write_lock:
+            record = payments.register_cash(order_id, body.get("amount"))
     except payments.PaymentError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return record
@@ -645,7 +715,8 @@ async def discard_cash(order_id: int, cash_id: int, request: Request):
         body = {}
     reason = body.get("reason") if isinstance(body, dict) else None
     try:
-        record = payments.discard_cash(order_id, cash_id, reason)
+        with db.write_lock:
+            record = payments.discard_cash(order_id, cash_id, reason)
     except payments.PaymentError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return record
@@ -658,8 +729,9 @@ def report(days: int = 1):
 
 @app.post("/api/reset")
 def reset():
-    db.reset()
-    brain.reset_all()
+    with db.write_lock:
+        db.reset()
+        brain.reset_all()
     return {"ok": True}
 
 
@@ -688,8 +760,3 @@ def kitchen():
 @app.get("/reports")
 def reports_page():
     return FileResponse(STATIC / "reports.html")
-
-
-@app.get("/simulator")
-def simulator():
-    return FileResponse(STATIC / "simulator.html")

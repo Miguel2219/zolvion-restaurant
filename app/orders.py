@@ -105,28 +105,31 @@ def create_from_cart(phone: str, fulfilment: str, address=None, zone=None) -> di
         cart_id = view["cart_id"]
         related = related_order_of(cart_id)
         code = _code()
-        while db.q1("SELECT 1 FROM orders WHERE code=?", (code,)):
+        while db.q1("SELECT 1 FROM orders WHERE code=%s", (code,)):
             code = _code()
 
-        cursor = db.run(
+        # The Chatwoot conversation it is made in (none outside Chatwoot mode): the
+        # panel's "ver conversación" link.
+        order_id = db.insert(
             """INSERT INTO orders(code, phone, cart_id, state, fulfilment_type, address, zone,
                                   subtotal, delivery_fee, total, related_order_id,
-                                  created_at, updated_at)
-               VALUES(?,?,?,'PENDING_CONFIRMATION',?,?,?,?,?,?,?,?,?)""",
+                                  created_at, updated_at, chatwoot_conversation_id)
+               VALUES(%s,%s,%s,'PENDING_CONFIRMATION',%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                      (SELECT chatwoot_conversation_id FROM conversations WHERE phone=%s))
+               RETURNING id""",
             (
                 code, phone, cart_id, fulfilment, address, view["zone"],
                 view["subtotal"], view["delivery_fee"], view["total"], related,
-                db.now(), db.now(),
+                db.now(), db.now(), phone,
             ),
         )
-        order_id = cursor.lastrowid
 
         _write_items(order_id, view["lines"])
         _log(order_id, None, "PENDING_CONFIRMATION", "system", "order created")
-        db.run("UPDATE carts SET state='CONVERTED', updated_at=? WHERE id=?", (db.now(), cart_id))
+        db.run("UPDATE carts SET state='CONVERTED', updated_at=%s WHERE id=%s", (db.now(), cart_id))
         db.run(
-            "INSERT INTO payments(order_id, method, transfer_amount, cash_amount, status, updated_at)"
-            " VALUES(?,'UNSPECIFIED',0,0,'PENDING',?)",
+            "INSERT INTO payments(order_id, method, transfer_amount, cash_amount, updated_at)"
+            " VALUES(%s,'UNSPECIFIED',0,0,%s)",
             (order_id, db.now()),
         )
     return get(order_id)
@@ -136,7 +139,7 @@ def _write_items(order_id: int, lines: list[dict]) -> None:
     for line in lines:
         db.run(
             """INSERT INTO order_items(order_id, item_id, name, qty, unit_price, modifiers, note, line_total)
-               VALUES(?,?,?,?,?,?,?,?)""",
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 order_id, line["item_id"], line["name"], line["qty"],
                 line["unit_price"], json.dumps(line["modifiers"]),
@@ -179,22 +182,21 @@ def amend(
         # not assert: python -O must not strip a guard that protects a write.
         if total_of([line["line_total"] for line in view["lines"]], view["delivery_fee"]) != view["total"]:
             raise ValueError("total does not match its line items")
-        marks = ",".join("?" * len(EDITABLE))
+        marks = ",".join(["%s"] * len(EDITABLE))
         cursor = db.run(
-            f"UPDATE orders SET cart_id=?, fulfilment_type=?, address=?, zone=?, subtotal=?,"
-            f" delivery_fee=?, total=?, edited_at=?, updated_at=? WHERE id=? AND state IN ({marks})",
+            f"UPDATE orders SET cart_id=%s, fulfilment_type=%s, address=%s, zone=%s, subtotal=%s,"
+            f" delivery_fee=%s, total=%s, edited_at=%s, updated_at=%s WHERE id=%s AND state IN ({marks})",
             (staging, fulfilment, address, view["zone"], view["subtotal"], view["delivery_fee"],
              view["total"], db.now(), db.now(), order_id, *EDITABLE),
         )
         if cursor.rowcount == 0:
             raise NotEditable("accepted meanwhile")
-        db.run("DELETE FROM order_items WHERE order_id=?", (order_id,))
+        db.run("DELETE FROM order_items WHERE order_id=%s", (order_id,))
         _write_items(order_id, view["lines"])
-        db.run("UPDATE carts SET state='CONVERTED', updated_at=? WHERE id=?", (db.now(), staging))
-        # Verified: the "accepted meanwhile" race cannot happen today. Every write
-        # route (inbound, sim_message, order_event, confirm_receipt, discard_receipt,
-        # register_cash, discard_cash) is an async def with no await around the database work, so
-        # bot turns and staff buttons run one at a time on the event-loop thread. The
+        db.run("UPDATE carts SET state='CONVERTED', updated_at=%s WHERE id=%s", (db.now(), staging))
+        # The "accepted meanwhile" race cannot happen today: bot turns run in the
+        # worker thread and staff buttons on the server's loop, but each tool call and
+        # each panel write holds db.write_lock, so they still write one at a time. The
         # guarded UPDATE ... WHERE state IN (...) stays as a defense in case that
         # changes, and the transaction makes its outcome clean either way.
         #
@@ -207,19 +209,19 @@ def amend(
 
 
 def mark_edited(order_id: int) -> None:
-    db.run("UPDATE orders SET edited_at=? WHERE id=?", (db.now(), order_id))
+    db.run("UPDATE orders SET edited_at=%s WHERE id=%s", (db.now(), order_id))
 
 
 def _log(order_id: int, from_state, to_state: str, actor: str, reason=None) -> None:
     db.run(
         "INSERT INTO order_transitions(order_id, from_state, to_state, actor, reason, at)"
-        " VALUES(?,?,?,?,?,?)",
+        " VALUES(%s,%s,%s,%s,%s,%s)",
         (order_id, from_state, to_state, actor, reason, db.now()),
     )
 
 
 def apply_event(order_id: int, event: str, reason=None) -> dict:
-    row = db.q1("SELECT * FROM orders WHERE id=?", (order_id,))
+    row = db.q1("SELECT * FROM orders WHERE id=%s", (order_id,))
     if row is None:
         raise IllegalTransition("Ese pedido no existe.")
     current = row["state"]
@@ -232,24 +234,24 @@ def apply_event(order_id: int, event: str, reason=None) -> dict:
     to_state, actor = target
     if to_state == "OUT_FOR_DELIVERY" and row["fulfilment_type"] != "DELIVERY":
         raise IllegalTransition("Solo un pedido a domicilio puede salir a domicilio.")
-    db.run("UPDATE orders SET state=?, updated_at=? WHERE id=?", (to_state, db.now(), order_id))
+    db.run("UPDATE orders SET state=%s, updated_at=%s WHERE id=%s", (to_state, db.now(), order_id))
     _log(order_id, current, to_state, actor, reason)
     return get(order_id)
 
 
 def get(order_id: int) -> dict:
-    row = db.q1("SELECT * FROM orders WHERE id=?", (order_id,))
+    row = db.q1("SELECT * FROM orders WHERE id=%s", (order_id,))
     if row is None:
         raise KeyError(order_id)
     order = dict(row)
     order["items"] = [
         {**dict(item), "modifiers": db.jloads(item["modifiers"], [])}
-        for item in db.q("SELECT * FROM order_items WHERE order_id=? ORDER BY id", (order_id,))
+        for item in db.q("SELECT * FROM order_items WHERE order_id=%s ORDER BY id", (order_id,))
     ]
-    if db.q1("SELECT 1 FROM payments WHERE order_id=?", (order_id,)):
+    if db.q1("SELECT 1 FROM payments WHERE order_id=%s", (order_id,)):
         order["payment"] = payments.current(order_id)
     order["transitions"] = [dict(t) for t in db.q(
-        "SELECT * FROM order_transitions WHERE order_id=? ORDER BY id", (order_id,)
+        "SELECT * FROM order_transitions WHERE order_id=%s ORDER BY id", (order_id,)
     )]
     order["handoffs"] = handoff.open_for(order_id)
     return order
@@ -257,22 +259,22 @@ def get(order_id: int) -> dict:
 
 def latest_for(phone: str, states=None) -> dict | None:
     if states:
-        marks = ",".join("?" * len(states))
+        marks = ",".join(["%s"] * len(states))
         row = db.q1(
-            f"SELECT id FROM orders WHERE phone=? AND state IN ({marks}) ORDER BY id DESC LIMIT 1",
+            f"SELECT id FROM orders WHERE phone=%s AND state IN ({marks}) ORDER BY id DESC LIMIT 1",
             (phone, *states),
         )
     else:
-        row = db.q1("SELECT id FROM orders WHERE phone=? ORDER BY id DESC LIMIT 1", (phone,))
+        row = db.q1("SELECT id FROM orders WHERE phone=%s ORDER BY id DESC LIMIT 1", (phone,))
     return get(row["id"]) if row else None
 
 
 def live_states(phone: str) -> list[str]:
     """The states of this phone's non-terminal orders, newest first - the
     per-phone version of board()."""
-    marks = ",".join("?" * len(TERMINAL))
+    marks = ",".join(["%s"] * len(TERMINAL))
     rows = db.q(
-        f"SELECT state FROM orders WHERE phone=? AND state NOT IN ({marks}) ORDER BY id DESC",
+        f"SELECT state FROM orders WHERE phone=%s AND state NOT IN ({marks}) ORDER BY id DESC",
         (phone, *sorted(TERMINAL)),
     )
     return [row["state"] for row in rows]
@@ -298,7 +300,7 @@ def last_actor(order_id: int) -> str | None:
     this to decide whether a CANCELLED is announced — a customer who cancelled
     already knows."""
     row = db.q1(
-        "SELECT actor FROM order_transitions WHERE order_id=? ORDER BY id DESC LIMIT 1",
+        "SELECT actor FROM order_transitions WHERE order_id=%s ORDER BY id DESC LIMIT 1",
         (order_id,),
     )
     return row["actor"] if row else None
@@ -306,7 +308,7 @@ def last_actor(order_id: int) -> str | None:
 
 def last_reason(order_id: int) -> str | None:
     row = db.q1(
-        "SELECT reason FROM order_transitions WHERE order_id=? ORDER BY id DESC LIMIT 1",
+        "SELECT reason FROM order_transitions WHERE order_id=%s ORDER BY id DESC LIMIT 1",
         (order_id,),
     )
     return row["reason"] if row else None

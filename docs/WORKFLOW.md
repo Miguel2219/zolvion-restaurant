@@ -16,9 +16,9 @@ How work on the MVP is organised, who does what, and how a task goes from idea t
 ## 2. Lettered tasks
 
 Work is split into tasks named by letter. Done: A (payments), B (editing orders and
-handoffs), C (one row per receipt), C2 Part 1 (fixes from the 1 Oct code review). C2
-Part 2 (the "Pagos" block) is coded and waits for its Notion checklist. Planned: D
-(Chatwoot) and a notifications bell (`CURRENT-STATE.md` §2).
+handoffs), C (one row per receipt), C2 Part 1 (fixes from the 1 Oct code review), C2
+Part 2 (the "Pagos" block), D (PostgreSQL, then WhatsApp through Chatwoot). Planned:
+a notifications bell and staff editing of orders (`CURRENT-STATE.md` §2).
 
 A code review can start a task: Claude Code reviews the code, Miguel reproduces each
 finding by hand on a "Bug Check" page, and the findings become the task's rows (C2).
@@ -51,7 +51,7 @@ preparation) and a table:
 | Column | Content |
 |---|---|
 | Box | Empty until tested. ✅ passed, ❌ failed |
-| Description | One observable behaviour, written so a person can check it on the panel, the simulator or a phone |
+| Description | One observable behaviour, written so a person can check it on the panel, in Chatwoot or on a phone |
 | Notes | How to test it, or what was observed (order code, message sent, what went wrong, "before the fix") |
 
 Rules for writing rows:
