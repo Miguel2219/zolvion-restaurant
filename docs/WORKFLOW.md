@@ -17,8 +17,7 @@ How work on the MVP is organised, who does what, and how a task goes from idea t
 
 Work is split into tasks named by letter. Done: A (payments), B (editing orders and
 handoffs), C (one row per receipt), C2 Part 1 (fixes from the 1 Oct code review), C2
-Part 2 (the "Pagos" block). In progress: D (PostgreSQL done; WhatsApp through Chatwoot
-coded, hand test pending). Planned:
+Part 2 (the "Pagos" block), D (PostgreSQL, then WhatsApp through Chatwoot). Planned:
 a notifications bell and staff editing of orders (`CURRENT-STATE.md` §2).
 
 A code review can start a task: Claude Code reviews the code, Miguel reproduces each

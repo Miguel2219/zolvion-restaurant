@@ -23,9 +23,8 @@ restaurants that Miguel demos to restaurant owners and sells as a SaaS. The code
 in the local folder `zolvion-demo` (Python, FastAPI, PostgreSQL, the Anthropic API,
 WhatsApp through Chatwoot, two static HTML pages). Launch city: Ocaña (Norte de Santander);
 Caseritas Burger (Bucaramanga) is the test restaurant, not a prospect. Tasks A, B, C and
-C2 (Parts 1 and 2) are done; Task D (PostgreSQL, then WhatsApp through Chatwoot, where
-Zolvion is the Agent Bot) is coded and waits for its hand test; a notifications bell is
-planned.
+C2 (Parts 1 and 2) and D (PostgreSQL, then WhatsApp through Chatwoot, where Zolvion is
+the Agent Bot) are done; a notifications bell is planned.
 
 Read README_1.md first. It maps every other document.
 

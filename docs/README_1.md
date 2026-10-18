@@ -7,7 +7,7 @@ Snapshot these docs describe: code last changed **2026-10-17**, Task D Part 2 (W
 through Chatwoot, on top of Part 1's PostgreSQL; local folder
 `C:\Users\PC\Desktop\zolvion-demo`, git branch `feature/d-whatsapp-chatwoot`), with 356
 automated tests passing and 1 expected failure (G16); Notion task checklists A, B, C, C2
-Part 1 and C2 Part 2 all ✅; Task D Part 2's hand test not run yet.
+Part 1, C2 Part 2 and D Part 2 all ✅.
 Anything newer is not reflected here until the docs are updated.
 
 ---

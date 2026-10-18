@@ -144,3 +144,4 @@ The full hand-test list is the Notion page "Task D Plan (Part 2: WhatsApp + Chat
 | The bot never answers a conversation | it is Open (or was created before the bot was connected) |
 | Photos say "image no longer available" in Chatwoot | Chatwoot opened through `localhost` with free ngrok: use the ngrok domain |
 | Meta can't verify the webhook | ngrok is not pointing at port 3000 |
+| Docker Desktop shows an error at start; its log says `remove …\Docker\run\dockerInference` or `…\docker-secrets-engine\engine.sock: The file cannot be accessed by the system` | Socket files left by an earlier crash, not a port. Close Docker Desktop completely, rename both folders in `%LOCALAPPDATA%` (`Docker\run`, `docker-secrets-engine`; Docker creates them again) and start it once (18 Oct) |
