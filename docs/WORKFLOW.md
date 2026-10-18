@@ -17,7 +17,8 @@ How work on the MVP is organised, who does what, and how a task goes from idea t
 
 Work is split into tasks named by letter. Done: A (payments), B (editing orders and
 handoffs), C (one row per receipt), C2 Part 1 (fixes from the 1 Oct code review), C2
-Part 2 (the "Pagos" block). In progress: D (PostgreSQL, WhatsApp and Chatwoot). Planned:
+Part 2 (the "Pagos" block). In progress: D (PostgreSQL done; WhatsApp through Chatwoot
+coded, hand test pending). Planned:
 a notifications bell and staff editing of orders (`CURRENT-STATE.md` §2).
 
 A code review can start a task: Claude Code reviews the code, Miguel reproduces each
@@ -51,7 +52,7 @@ preparation) and a table:
 | Column | Content |
 |---|---|
 | Box | Empty until tested. ✅ passed, ❌ failed |
-| Description | One observable behaviour, written so a person can check it on the panel, the simulator or a phone |
+| Description | One observable behaviour, written so a person can check it on the panel, in Chatwoot or on a phone |
 | Notes | How to test it, or what was observed (order code, message sent, what went wrong, "before the fix") |
 
 Rules for writing rows:

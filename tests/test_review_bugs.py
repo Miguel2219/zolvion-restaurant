@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from app import brain, cart, db, main, orders, payments, wa
+from app import brain, cart, db, main, orders, payments, wa, worker
 from app.catalog import CATALOG
 from app.money import MoneyError, fmt, pesos
 
@@ -110,14 +110,18 @@ def _fake_model(monkeypatch, answer):
 
 
 def _webhook(monkeypatch, message):
-    """POST one WhatsApp message, in Meta's envelope, to /webhook."""
+    """POST one WhatsApp message, in Meta's envelope, to /webhook, and let the worker
+    answer it (the webhook only stores it)."""
     client = _client(monkeypatch)
     monkeypatch.setattr(wa, "check_signature", lambda raw, header: True)
+    monkeypatch.setenv("MESSAGE_WAIT_SECONDS", "0")
     payload = {"entry": [{"changes": [{"value": {
         "contacts": [{"wa_id": PHONE, "profile": {"name": "Ana"}}],
         "messages": [{"from": PHONE, "id": f"wamid.{uuid.uuid4().hex}", **message}],
     }}]}]}
-    return client.post("/webhook", json=payload)
+    response = client.post("/webhook", json=payload)
+    worker.run_once()
+    return response
 
 
 def _count(table: str) -> int:
@@ -417,14 +421,12 @@ def test_r8_total_is_checked_before_writing(monkeypatch):
 def test_r9_replies_never_carry_the_code_or_cocina(monkeypatch, case):
     order = _confirmed_order()
     if case == "chat":
-        client = _client(monkeypatch)
         _fake_model(
             monkeypatch, lambda kw: _text(f"Su pedido {order['code']} ya está en la cocina.")
         )
-        response = client.post("/sim/message", json={"phone": PHONE, "text": "¿cómo va?"})
+        response = _webhook(monkeypatch, {"type": "text", "text": {"body": "¿cómo va?"}})
         assert response.status_code == 200
         expected = "Su pedido ya está en el local."
-        assert response.json()["reply"] == expected
         assert _last_outbound() == expected
         assert brain._history[PHONE][-1]["content"][0]["text"] == expected
     else:

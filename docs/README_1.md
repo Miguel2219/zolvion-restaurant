@@ -3,10 +3,11 @@
 Start here. This file says what the system is, why it exists, and which document answers
 which question.
 
-Snapshot these docs describe: code last changed **2026-10-15**, Task D Part 1 (PostgreSQL
-instead of SQLite; local folder `C:\Users\PC\Desktop\zolvion-demo`, git branch
-`feature/d-whatsapp-chatwoot`), with 308 automated tests passing and 1 expected failure
-(G16); Notion task checklists A, B, C, C2 Part 1 and C2 Part 2 all ✅.
+Snapshot these docs describe: code last changed **2026-10-17**, Task D Part 2 (WhatsApp
+through Chatwoot, on top of Part 1's PostgreSQL; local folder
+`C:\Users\PC\Desktop\zolvion-demo`, git branch `feature/d-whatsapp-chatwoot`), with 356
+automated tests passing and 1 expected failure (G16); Notion task checklists A, B, C, C2
+Part 1 and C2 Part 2 all ✅; Task D Part 2's hand test not run yet.
 Anything newer is not reflected here until the docs are updated.
 
 ---
@@ -15,7 +16,8 @@ Anything newer is not reflected here until the docs are updated.
 
 A WhatsApp ordering system for restaurants.
 
-1. A customer writes to the restaurant's WhatsApp number in normal language.
+1. A customer writes to the restaurant's WhatsApp number in normal language. The number
+   lives in Chatwoot, where staff see every conversation and can take any of them over.
 2. An AI assistant (Claude, using tools) understands what they want and builds the order.
    Code, never the AI, looks up every price and computes every total.
 3. The customer confirms. The order appears on a live panel in the restaurant. Until
@@ -47,7 +49,7 @@ owners and, once it runs reliably, what the first restaurants use.
 
 | | `zolvion-restaurant` | This MVP (`zolvion-demo` folder) |
 |---|---|---|
-| What it is | Full target architecture: SQS FIFO, ECS Fargate, RDS Postgres, Terraform, React kitchen display | One FastAPI process, PostgreSQL, static HTML panels, Claude with tool use |
+| What it is | Full target architecture: SQS FIFO, ECS Fargate, RDS Postgres, Terraform, React kitchen display | One FastAPI process with a worker thread, PostgreSQL, Chatwoot for WhatsApp, static HTML panels, Claude with tool use |
 | Status | Documented design, not being built as part of this MVP | **The product.** This is the system being sold and completed |
 | Reference for behaviour | No: its rules are not the reference here | Yes: decisions taken here are final for the MVP |
 
@@ -56,9 +58,7 @@ Consequences:
 - Do not import rules, states or architecture from `zolvion-restaurant` unless Miguel
   asks. Example: that design cancels and recreates an order on a change; this MVP edits
   the same order in place. Never copy code from here into that repo.
-- The repo's `CLAUDE.md` and `run.md` now describe the code as the MVP. Only the
-  `app/main.py` docstring still calls it "a convincing six-minute demo" (code, not docs:
-  `KNOWN-GAPS.md` G9).
+- The repo's `CLAUDE.md`, `run.md` and `app/main.py` describe the code as the MVP.
 - Code comments cite documents that only exist in `zolvion-restaurant` (`payments.md`,
   `order-modification.md`, "R3", "R9", "Invariant 6", …) and task-plan labels (Q1–Q3,
   D3). `rules.md` §4 explains each one so nobody has to go looking for them.
@@ -83,6 +83,7 @@ If a document is wrong, fix the document.
 | Payment methods, receipts, checks, confirm/discard, cash rows, the payment sentence, "Cómo pagaron" | `payments.md` |
 | The restaurant config file and onboarding a new restaurant | `CONFIG.md` |
 | Stack, setup, commands, tests, connecting WhatsApp | `BUILD-AND-RUN.md` |
+| Chatwoot: where it runs, the inbox, the Agent Bot, `.env`, how staff use it | `CHATWOOT-SETUP.md` |
 | Rules the code must never break; conventions; old references | `rules.md` |
 | What stands between today's code and a production MVP | `KNOWN-GAPS.md` |
 | How the work is organised (tasks, Notion, Claude vs Claude Code) | `WORKFLOW.md` |
@@ -95,7 +96,7 @@ script), `TEST.md` (manual regression script).
 
 - Notion: "Zolvion - Demo Documentation" —
   https://app.notion.com/p/Zolvion-Demo-Documentation-3e4ee8d8c287804dbe69f9c25fa115ff
-  › Tasks (Task A, B, C Plan; Bug Check; Task C2 Plan Parts 1 and 2) —
+  › Tasks (Task A, B, C Plan; Bug Check; Task C2 Plan Parts 1 and 2; Task D Plan Part 2) —
   https://app.notion.com/p/3e4ee8d8c28780c9a1a8fc08b4d861f9
 - Full-architecture repo (not this MVP): https://github.com/Miguel2219/zolvion-restaurant
 - The MVP folder is a local git repository with no remote yet (`KNOWN-GAPS.md` G7).

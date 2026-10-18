@@ -22,6 +22,12 @@ IntegrityError = psycopg.IntegrityError
 
 _local = threading.local()
 
+# One write at a time (Task D Part 2). Bot turns run in the worker thread and panel
+# buttons on the server's loop: each tool call, each receipt store, each webhook and
+# each panel write holds this lock. Model and Chatwoot calls never do, so it is only
+# ever held for a few database statements.
+write_lock = threading.RLock()
+
 # Timestamps are ISO-8601 text from now(), as before: every comparison in the code
 # is a string comparison against another now() value.
 SCHEMA = """
@@ -184,6 +190,48 @@ CREATE TABLE IF NOT EXISTS handoff_requests (
 );
 """
 
+# Task D Part 2 (Chatwoot). Added to an existing database without losing a row: init()
+# runs it on every start, and each statement does nothing the second time.
+UPGRADE = """
+-- RECEIVED -> PROCESSING -> DONE | HUMAN (a person had the conversation) | FAILED;
+-- INTERRUPTED when the app stopped half-way. Older rows were answered already: DONE.
+ALTER TABLE inbound_messages ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'DONE';
+ALTER TABLE inbound_messages ADD COLUMN IF NOT EXISTS conversation_id BIGINT;
+ALTER TABLE inbound_messages ADD COLUMN IF NOT EXISTS media_url TEXT;
+ALTER TABLE inbound_messages ADD COLUMN IF NOT EXISTS location TEXT;
+ALTER TABLE inbound_messages ADD COLUMN IF NOT EXISTS processed_at TEXT;
+ALTER TABLE inbound_messages ADD COLUMN IF NOT EXISTS error TEXT;
+CREATE INDEX IF NOT EXISTS inbound_messages_waiting
+  ON inbound_messages(phone, received_at) WHERE status = 'RECEIVED';
+
+-- The phone's newest Chatwoot conversation and its status. status_at is Chatwoot's
+-- clock (epoch seconds): an older event never overwrites a newer one. push_status is a
+-- status Zolvion still has to tell Chatwoot (a takeover), retried from push_try_at.
+-- caught_up_at: when the bot last read what a person and the customer wrote meanwhile.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS chatwoot_conversation_id BIGINT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS chatwoot_status TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS status_at DOUBLE PRECISION;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS push_status TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS push_try_at TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS caught_up_at TEXT;
+
+-- The conversation the order was made in, for the panel's "ver conversación".
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS chatwoot_conversation_id BIGINT;
+
+-- NONE (no Chatwoot) | OPENING (note and "open" not done yet) | OPEN.
+ALTER TABLE handoff_requests ADD COLUMN IF NOT EXISTS chatwoot_state TEXT NOT NULL DEFAULT 'NONE';
+ALTER TABLE handoff_requests ADD COLUMN IF NOT EXISTS chatwoot_note_id BIGINT;
+ALTER TABLE handoff_requests ADD COLUMN IF NOT EXISTS chatwoot_try_at TEXT;
+ALTER TABLE handoff_requests ADD COLUMN IF NOT EXISTS chatwoot_error TEXT;
+
+-- status adds SENDING (recorded, not sent yet), SUPPRESSED (a person took the
+-- conversation before the reply went out) and STAFF (a person's message in Chatwoot).
+ALTER TABLE outbound_messages ADD COLUMN IF NOT EXISTS conversation_id BIGINT;
+ALTER TABLE outbound_messages ADD COLUMN IF NOT EXISTS chatwoot_message_id BIGINT;
+CREATE UNIQUE INDEX IF NOT EXISTS outbound_chatwoot_message_unique
+  ON outbound_messages(chatwoot_message_id) WHERE chatwoot_message_id IS NOT NULL;
+"""
+
 TABLES = (
     "outbound_messages", "handoff_requests", "receipt_photos", "payment_receipts",
     "cash_payments", "payments", "order_transitions",
@@ -193,9 +241,8 @@ TABLES = (
 
 def now() -> str:
     """Microseconds, not seconds. Two messages can land in the same second, and
-    then the simulator cannot tell which came first when it rebuilds a thread
-    from two different tables. Still sorts correctly as a string against a
-    seconds-precision bound."""
+    the worker answers a phone's messages in the order they arrived. Still sorts
+    correctly as a string against a seconds-precision bound."""
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
@@ -218,6 +265,7 @@ def conn() -> psycopg.Connection:
 def init() -> None:
     try:
         conn().execute(SCHEMA)
+        conn().execute(UPGRADE)
     except psycopg.OperationalError as exc:
         raise RuntimeError(
             f"No hay conexión con PostgreSQL en {describe()}. "

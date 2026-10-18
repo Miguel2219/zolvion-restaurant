@@ -1,7 +1,7 @@
 # How to test the system
 
-- **Part A** — browser only, no phone. If it fails, the problem is code or config.
-- **Part B** — a real phone, only after Part A is green.
+- **Part A** — a phone and the panel. If it fails, the problem is code or config.
+- **Part B** — Chatwoot and what only a phone sends, after Part A is green.
 - **Part C** — regression by area, after any change. Each line: what to do → what you see.
 - **Part D** — automated tests.
 
@@ -11,10 +11,10 @@ Expected totals come from `config/restaurant.json`: change a price and they chan
 
 ---
 
-## Part A — in the browser (15 min)
+## Part A — a phone and the panel (15 min)
 
-`uvicorn app.main:app --reload --port 8000`, then open `/simulator` (you type as the
-customer) and `/kitchen` side by side. Click **Reiniciar demo** first.
+Chatwoot set up (`docs/CHATWOOT-SETUP.md`), `uvicorn app.main:app --reload --port 8000`,
+`/kitchen` open. Write from a phone that is not the business number. **Reiniciar demo** first.
 
 **A1 · Menu.** `Buenas, ¿qué tienen?` → Caserita $18.900 · Madurita $21.900 · Doble con
 Pechuga $24.900 · Especial $29.900. Any other price = the bot invented it: stop.
@@ -32,12 +32,12 @@ no invented price.
 (Cabecera): $5.000`, total **$48.800**. Then `Sí, confirmo` → card in **Nuevos** within
 2 s, $48.800, 🛵 Domicilio.
 
-**A6 · Buttons talk back.** Aceptar → Listo → Sale a domicilio → Entregado → a message in
-the simulator after Aceptar and Sale a domicilio (none after Listo on delivery, none after
+**A6 · Buttons talk back.** Aceptar → Listo → Sale a domicilio → Entregado → a message on
+the phone after Aceptar and Sale a domicilio (none after Listo on delivery, none after
 Entregado); the card moves and disappears after Entregado.
 
 **A7 · Wrong receipt.** New order, confirm, `Voy a pagar $20.000 por transferencia y el
-resto en efectivo` → the split and the Nequi account. Send (📎) a screenshot that is **not**
+resto en efectivo` → the split and the Nequi account. Send a screenshot that is **not**
 $20.000 → its row is red ("El monto no coincide…"); the bot says a person will review it,
 never that the payment is confirmed.
 
@@ -52,11 +52,12 @@ antes (referencia …)".
 **A10 · Reports.** `/reports` → sales, orders, average ticket, top item, how they paid,
 pickup vs delivery, lost orders, receipts flagged / awaiting, all from what you just did.
 
-## Part B — a real phone (10 min)
+## Part B — Chatwoot and what only a phone sends (10 min)
 
-1. The dot on the kitchen tab is **green** (grey = WhatsApp not connected).
-2. From a phone that is not the business number, write to the Claro number.
-3. Repeat A1, A2, A3, A5, A6 (same numbers), then A7 with a screenshot from the gallery.
+1. The panel shows a green dot and "WhatsApp por Chatwoot".
+2. `hola` · `quiero una especial` · `para recoger`, quickly → one answer to all three.
+3. Reply from Chatwoot on a Pending conversation → Open, the phone gets no bot; Pending → the bot
+   answers without repeating the person. A C3 box → private note, Open; "Ya lo atendí" → Pending.
 4. Messages that are not text (R5), one by one:
    - **Voice note** → the bot says it can't listen to voice notes, asks you to write it and
      carries on with the order; it never acts as if it understood.
@@ -69,10 +70,9 @@ pickup vs delivery, lost orders, receipts flagged / awaiting, all from what you 
 
 | What you see in the uvicorn window | Meaning |
 |---|---|
-| Nothing at all | Meta is not reaching you: ngrok died, old webhook URL, or `messages` not subscribed |
-| `403` | Wrong `WHATSAPP_APP_SECRET` |
-| A message arrives but no reply | Bad `ANTHROPIC_API_KEY`, or no credit |
-| Reply generated but never arrives | Wrong `WHATSAPP_PHONE_NUMBER_ID`, or invalid token |
+| Nothing at all | Chatwoot is not reaching Zolvion: the bot's webhook URL, the bot not connected to the inbox, or Meta not reaching Chatwoot (ngrok) |
+| `401` / `503` | Wrong `CHATWOOT_BOT_SECRET` / a `CHATWOOT_*` setting missing |
+| A message arrives but no reply | Bad `ANTHROPIC_API_KEY`, no credit, or the conversation is Open |
 | `Perdón, se me cruzaron los cables` | The code threw; the traceback is there |
 
 ---
@@ -111,7 +111,7 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
 - Reason no tool covers (`necesito factura electrónica con NIT`) → amber box on the card in
   Nuevos or Recibidos; the bot mentions no change and promises no time.
 - `no, sólo quiero hablar con alguien` → box saying the customer gave no reason.
-- No card (new `?phone=`, or only a delivered order) → "por ahora no puedo pasar esa
+- No card (a phone with no order, or only a delivered one) → "por ahora no puedo pasar esa
   solicitud"; no box, no promise. After Aceptar it never says "no ha sido aceptado".
 
 ### C4 · What the customer receives
@@ -177,20 +177,20 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
 - Mixed $10.000 + cash, a $15.000 transfer confirmed at $15.000 → "Efectivo por cobrar
   $7.400". Removing a product below what was paid → "Sobrepago", no refund promised.
 
-### C8 · Panel, reports, simulator
+### C8 · Panel and reports
 - Columns Nuevos · Recibidos · Listos · En camino; "Volver a preparar" returns to Recibidos.
 - No receipt state ever blocks Aceptar, Listo, Sale a domicilio or Entregado.
 - Reports: "Comprobantes marcados"/"por confirmar" count all time, discarded excluded;
   "Hoy" is the Bucaramanga calendar day; "Sin confirmar" shows orders waiting for the "sí";
   "Cómo pagaron" by money received (cash, confirmed transfers), plus confirmed
   overpayments and payments on cancelled/rejected orders.
-- Leaving the simulator and coming back keeps the whole conversation.
+- "ver conversación" on a card opens that order's conversation in Chatwoot.
 - Last: copy a photo address, Reiniciar demo → that address shows "Sin foto".
 
 ## Part D — automated tests
 
-`python -m pytest tests -q` → **308 passed, 1 xfailed** (B: 147, C: 210, C2 Part 1: 263,
-C2 Part 2: 310, D Part 1 on PostgreSQL: 308; the xfail is G16, out of scope).
+`python -m pytest tests -q` → **356 passed, 1 xfailed** (B: 147, C: 210, C2 Part 1: 263,
+C2 Part 2: 310, D Part 1: 308, D Part 2: 356; the xfail is G16, out of scope).
 
 ## Before the demo
 

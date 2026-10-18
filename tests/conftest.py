@@ -33,6 +33,11 @@ if not NAME.endswith("_test"):
                 returncode=2)
 # Set, not setdefault: a DATABASE_URL in the shell or in .env must not win here.
 os.environ["DATABASE_URL"] = TEST_URL
+# The tests never reach a real Chatwoot: .env may hold one, and app/__init__.py would load
+# it (it never overrides a variable that is already set, even to ""). Chatwoot tests set
+# their own values with monkeypatch.
+for name in ("CHATWOOT_URL", "CHATWOOT_ACCOUNT_ID", "CHATWOOT_BOT_TOKEN", "CHATWOOT_BOT_SECRET"):
+    os.environ[name] = ""
 
 try:
     with psycopg.connect(make_conninfo(TEST_URL, dbname="postgres"), autocommit=True) as server:

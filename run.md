@@ -4,8 +4,8 @@ This is the MVP of Zolvion Restaurant, not the full architecture: that design (q
 worker, Postgres, Terraform) lives in `zolvion-restaurant`. Never copy code from here
 into that repo.
 
-Do the steps in order. Do not skip step 4: testing offline first means that if
-something breaks later, you know it is WhatsApp and not your code.
+Do the steps in order. Do not skip step 4: if the tests and the panel work before
+WhatsApp is connected, a later failure is the connection, not your code.
 
 ---
 
@@ -36,8 +36,8 @@ notepad .env
 
 Put `ANTHROPIC_API_KEY=sk-ant-...` and save. Keep `ANTHROPIC_MODEL=claude-haiku-5-5` and
 `ANTHROPIC_PROOF_MODEL=claude-sonnet-5-5` as they come: Sonnet 5.5 and Opus 5.5 can't be the
-chat model, they fail on payment questions. Leave every `WHATSAPP_*` line empty for now.
-Empty = offline mode.
+chat model, they fail on payment questions. Leave every `WHATSAPP_*` and `CHATWOOT_*` line
+empty for now: no message leaves.
 
 ## Step 3 — Start it
 
@@ -46,71 +46,41 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 Leave this window open. The banner says whether the key is there, which models answer
-the chat and read receipts, whether WhatsApp is connected and whether the webhook
-signature is checked.
+the chat and read receipts, how WhatsApp is connected and whether the webhook signature is
+checked.
 
-## Step 4 — Test offline first (10 min) — do not skip
+## Step 4 — Check before connecting (5 min) — do not skip
 
-| Tab | What it is |
-|---|---|
-| http://localhost:8000/simulator | Fake WhatsApp: you type as the customer |
-| http://localhost:8000/kitchen | Staff panel |
-| http://localhost:8000/reports | Owner's reports |
+`python -m pytest tests -q` → **356 passed, 1 xfailed**. Open
+http://localhost:8000/kitchen (staff panel) and http://localhost:8000/reports (owner's
+reports): both load, the panel says WhatsApp is not connected. There is no simulator: the
+customer side is a real phone from Step 7. **If anything fails here, fix it now.**
+
+## Steps 5–6 — Chatwoot and WhatsApp (30 min the first time)
+
+Follow `docs/CHATWOOT-SETUP.md` §3–5: Chatwoot in Docker, ngrok pointed at Chatwoot (port
+3000, not Zolvion), the WhatsApp inbox with a **permanent** Meta token (a temporary one dies
+after 24 hours), Meta's webhook pointed at Chatwoot, the Agent Bot connected to the inbox,
+and the four `CHATWOOT_*` values in `.env`. Then **stop uvicorn (Ctrl+C) and start it
+again**: `.env` is only read at startup. The panel now says "WhatsApp por Chatwoot".
+
+## Step 7 — Test with a real phone (10 min)
+
+Write to the Claro business number from another phone; keep Chatwoot open beside the panel.
 
 1. `Quiero dos caseritas maduritas y una gaseosa personal` → **$47.300** (21.900 × 2 + 3.500)
 2. `¿Tienen pizza hawaiana?` → it says no, never invents it
 3. `Para domicilio en Cabecera, calle 48 #34-20` → adds $5.000
 4. `Sí, confirmo` → the order appears in **Nuevos** within 2 seconds
-5. Aceptar → Listo → Sale a domicilio → Entregado: the messages appear in the simulator
-6. Reports → sales, top item, payment split
+5. Aceptar → Listo → Sale a domicilio → Entregado: the messages reach the phone
+6. Reply once from Chatwoot: the bot stops; set the conversation to Pending: it is back
 
-Then `python -m pytest tests -q` → **308 passed, 1 xfailed**. Full checks: `TEST.md`.
-**If anything fails here, fix it now.** Do not move on to WhatsApp.
+Full checks: `TEST.md`. When something is off: `docs/CHATWOOT-SETUP.md` §8.
 
-## Step 5 — Connect WhatsApp Cloud API (15 min)
+## Step 8 — Before the demo
 
-<https://developers.facebook.com> → your App → **WhatsApp → API Setup**:
-
-| In Meta | Into `.env` |
-|---|---|
-| Temporary access token | `WHATSAPP_TOKEN` |
-| Phone number ID (under your Claro number) | `WHATSAPP_PHONE_NUMBER_ID` |
-| App Settings → Basic → App Secret (Show) | `WHATSAPP_APP_SECRET` |
-
-Also `WHATSAPP_VERIFY_TOKEN=zolvion-demo` (any word, just remember it). Save, then
-**stop uvicorn (Ctrl+C) and start it again**: `.env` is only read at startup.
-
-> The temporary token dies after 24 hours. Generate a fresh one the **morning of the
-> demo**. For a longer life, create a System User token in Meta Business Settings.
-
-## Step 6 — Put your laptop on the internet (5 min)
-
-In a **second** PowerShell window: `ngrok http 8000`. Copy the
-`https://....ngrok-free.app` line. **Do not close it and do not restart ngrok**: the free
-URL changes every time, and then you redo step 7.
-
-## Step 7 — Point Meta at your laptop (5 min)
-
-Meta → **WhatsApp → Configuration → Webhook → Edit**:
-
-- Callback URL: `https://YOUR-NGROK-URL.ngrok-free.app/webhook`
-- Verify token: `zolvion-demo`, then **Verify and save** (must go green; if not,
-  uvicorn is not running or the URL is wrong)
-- **Manage** → subscribe to the **messages** field. Everyone forgets this step.
-
-Reload the kitchen tab: green dot = WhatsApp connected; grey = offline mode.
-
-## Step 8 — Test with a real phone (5 min)
-
-Write to the Claro business number from another phone and order something.
-
-| Symptom | Cause |
-|---|---|
-| Nothing in the uvicorn window | Meta is not reaching you: webhook URL, ngrok, or `messages` not subscribed |
-| `403` in the uvicorn window | Wrong `WHATSAPP_APP_SECRET` |
-| Message arrives, no reply | Bad `ANTHROPIC_API_KEY` or no credit |
-| Reply fails silently | Token expired, or wrong `WHATSAPP_PHONE_NUMBER_ID` (see `outbound_messages.error`) |
-| "Perdón, se me cruzaron los cables" | The code threw; the traceback is in the uvicorn window |
+Docker Desktop and Chatwoot running, ngrok on port 3000, the recorder
+(`tools/record_chatwoot.py`) stopped: it uses port 8000 too.
 
 ## Step 9 — The demo (6 minutes)
 
@@ -151,8 +121,8 @@ then **restart**. No code changes: that file is the product (`docs/CONFIG.md`).
 
 - [ ] Prices in `config/restaurant.json` verified with your cousin
 - [ ] The Nequi account in the config is the restaurant's, not your test account
-- [ ] Fresh Meta token generated **today**
-- [ ] ngrok running, webhook verified green, subscribed to `messages`
+- [ ] Chatwoot running in Docker; ngrok pointing at it (port 3000); the bot connected to the inbox
+- [ ] Banner: "WhatsApp : por Chatwoot"; Chatwoot opened through the ngrok domain
 - [ ] Sent yourself a test order end to end
 - [ ] Wrong screenshot ready (any old one, or another amount)
 - [ ] Correct receipt = a **new real transfer made after confirming the order**, for the
@@ -165,7 +135,7 @@ then **restart**. No code changes: that file is the product (`docs/CONFIG.md`).
 
 Say this if he asks. Honesty buys more credibility than the demo itself.
 
-- No queue, no retries, no AWS. One process on your laptop.
+- No queue, no AWS: one process on your laptop, plus Chatwoot in Docker.
 - No timers: carts do not expire, unanswered orders do not die.
 - Chat history is in memory: restarting uvicorn makes the bot forget the conversation.
   Orders and reports survive (PostgreSQL).

@@ -1,0 +1,88 @@
+{
+ "account": {
+  "id": 2,
+  "name": "Zolvion"
+ },
+ "additional_attributes": {},
+ "content_attributes": {},
+ "content_type": "text",
+ "content": "Nota de prueba",
+ "conversation": {
+  "additional_attributes": {},
+  "can_reply": true,
+  "channel": "Channel::Whatsapp",
+  "contact_inbox": {
+   "id": 1141956389,
+   "contact_id": 1138372182,
+   "inbox_id": 147531,
+   "source_id": "573001112233",
+   "created_at": "2026-10-16T20:55:49.058Z",
+   "updated_at": "2026-10-16T20:55:49.058Z",
+   "hmac_verified": false,
+   "pubsub_token": "test-token"
+  },
+  "id": 1,
+  "inbox_id": 147531,
+  "labels": [],
+  "meta": {
+   "sender": {
+    "additional_attributes": {},
+    "custom_attributes": {},
+    "email": null,
+    "id": 1138372182,
+    "identifier": null,
+    "name": "Ana Prueba",
+    "phone_number": "+573001112233",
+    "thumbnail": "",
+    "blocked": false,
+    "contact_type": "lead",
+    "type": "contact"
+   },
+   "assignee": {
+    "id": 185680,
+    "name": "Hola",
+    "available_name": "Hola",
+    "avatar_url": "",
+    "type": "user",
+    "availability_status": "online",
+    "thumbnail": ""
+   },
+   "assignee_type": "User",
+   "team": null,
+   "hmac_verified": false
+  },
+  "status": "open",
+  "custom_attributes": {},
+  "snoozed_until": null,
+  "unread_count": 0,
+  "first_reply_created_at": "2026-10-16T21:26:51.708Z",
+  "priority": null,
+  "waiting_since": 0,
+  "agent_last_seen_at": 1792186011,
+  "contact_last_seen_at": 0,
+  "last_activity_at": 1792186032,
+  "timestamp": 1792186032,
+  "created_at": 1792184149,
+  "updated_at": 1792186032.779353,
+  "account": {
+   "id": 2,
+   "name": "Zolvion"
+  }
+ },
+ "created_at": "2026-10-16T21:27:12.197Z",
+ "id": 927591077,
+ "inbox": {
+  "id": 147531,
+  "name": "Demostración Restaurante"
+ },
+ "message_type": "outgoing",
+ "private": true,
+ "sender": {
+  "id": 185680,
+  "name": "Hola",
+  "email": "personal@example.com",
+  "type": "user"
+ },
+ "source_id": null,
+ "event": "message_created"
+}

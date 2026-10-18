@@ -108,16 +108,19 @@ def create_from_cart(phone: str, fulfilment: str, address=None, zone=None) -> di
         while db.q1("SELECT 1 FROM orders WHERE code=%s", (code,)):
             code = _code()
 
+        # The Chatwoot conversation it is made in (none outside Chatwoot mode): the
+        # panel's "ver conversación" link.
         order_id = db.insert(
             """INSERT INTO orders(code, phone, cart_id, state, fulfilment_type, address, zone,
                                   subtotal, delivery_fee, total, related_order_id,
-                                  created_at, updated_at)
-               VALUES(%s,%s,%s,'PENDING_CONFIRMATION',%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                  created_at, updated_at, chatwoot_conversation_id)
+               VALUES(%s,%s,%s,'PENDING_CONFIRMATION',%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                      (SELECT chatwoot_conversation_id FROM conversations WHERE phone=%s))
                RETURNING id""",
             (
                 code, phone, cart_id, fulfilment, address, view["zone"],
                 view["subtotal"], view["delivery_fee"], view["total"], related,
-                db.now(), db.now(),
+                db.now(), db.now(), phone,
             ),
         )
 
@@ -191,10 +194,9 @@ def amend(
         db.run("DELETE FROM order_items WHERE order_id=%s", (order_id,))
         _write_items(order_id, view["lines"])
         db.run("UPDATE carts SET state='CONVERTED', updated_at=%s WHERE id=%s", (db.now(), staging))
-        # Verified: the "accepted meanwhile" race cannot happen today. Every write
-        # route (inbound, sim_message, order_event, confirm_receipt, discard_receipt,
-        # register_cash, discard_cash) is an async def with no await around the database work, so
-        # bot turns and staff buttons run one at a time on the event-loop thread. The
+        # The "accepted meanwhile" race cannot happen today: bot turns run in the
+        # worker thread and staff buttons on the server's loop, but each tool call and
+        # each panel write holds db.write_lock, so they still write one at a time. The
         # guarded UPDATE ... WHERE state IN (...) stays as a defense in case that
         # changes, and the transaction makes its outcome clean either way.
         #

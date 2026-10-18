@@ -20,6 +20,7 @@
   .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);
        box-shadow:0 0 0 3px rgba(46,160,67,.18)}
   .dot.off{background:var(--muted);box-shadow:0 0 0 3px rgba(139,150,165,.15)}
+  .channel{color:var(--muted);font-size:12.5px}
   .spacer{flex:1}
   header a,header button{color:var(--ink);background:#20262f;border:1px solid var(--line);
        border-radius:9px;padding:7px 13px;font-size:13px;cursor:pointer;text-decoration:none}
@@ -103,14 +104,12 @@
 <header>
   <span class="dot" id="live"></span>
   <h1 id="title">Panel de pedidos</h1>
+  <span class="channel" id="channel"></span>
   <span class="spacer"></span>
   <a href="/reports">Reportes</a>
-  <a href="/simulator">Simulador</a>
   <button onclick="askReset()">Reiniciar demo</button>
 </header>
-<div class="banner" id="fakebanner" hidden>
-  Modo simulador: WhatsApp no está conectado. Los mensajes al cliente se ven en la pestaña Simulador.
-</div>
+<div class="banner" id="setupbanner" hidden></div>
 <main id="board"></main>
 <div id="toast"></div>
 
@@ -135,6 +134,8 @@ const NEEDS_REASON = {
   staff_rejects: ['Rechazar el pedido', 'El cliente va a recibir este motivo explicado con sus palabras.'],
   staff_cancels: ['Cancelar el pedido', 'El cliente va a recibir este motivo explicado con sus palabras.'],
 };
+
+const CHANNEL = {chatwoot:'WhatsApp por Chatwoot', whatsapp:'WhatsApp directo'};
 
 const METODO = {CASH:'Efectivo', TRANSFER:'Transferencia', MIXED:'Mixto', UNSPECIFIED:'Sin especificar'};
 // Whether a RECEIPT checks out. Separate from whether the ORDER is paid - the
@@ -334,10 +335,12 @@ function card(o){
       ${pay.overpayment_amount ? `<span class="tag warn">Sobrepago ${money(pay.overpayment_amount)}</span>` : ''}
       ${o.delivery_fee ? '<span class="tag">domicilio ' + money(o.delivery_fee) + '</span>' : ''}
       ${o.related_order_id ? '<span class="tag link">pedido aparte</span>' : ''}
+      ${o.chatwoot_link ? `<a class="tag link" href="${esc(o.chatwoot_link)}" target="_blank" rel="noopener">ver conversación</a>` : ''}
     </div>
     ${handoffs.length
-      ? `<div class="handoff"><b>🙋 Necesita a una persona</b>${handoffs.map(h =>
-          `${hhmm(h.created_at)} · ${esc(h.summary)}`).join('<br>')}
+      ? `<div class="handoff"><b>🙋 Necesita a una persona</b>
+          ${handoffs.some(h => h.chatwoot_failed) ? '<span class="tag bad">Chatwoot sin actualizar</span><br>' : ''}
+          ${handoffs.map(h => `${hhmm(h.created_at)} · ${esc(h.summary)}`).join('<br>')}
           <div class="acts" style="margin-top:7px">
             <button class="ghost" onclick="resolveHandoff(${o.id})">Ya lo atendí</button>
           </div></div>` : ''}
@@ -486,7 +489,12 @@ api('/api/config').then(c => {
   document.getElementById('title').textContent = c.business.name + ' · Panel de pedidos';
   document.title = c.business.short_name + ' · Panel';
   document.getElementById('live').className = 'dot' + (c.live_whatsapp ? '' : ' off');
-  document.getElementById('fakebanner').hidden = c.live_whatsapp;
+  document.getElementById('channel').textContent = CHANNEL[c.channel] || '';
+  const banner = document.getElementById('setupbanner');
+  banner.textContent = c.channel === 'incomplete'
+    ? `Falta configurar Chatwoot (${c.missing.join(', ')}): no entran ni salen mensajes de WhatsApp.`
+    : c.channel === 'none' ? 'WhatsApp no está conectado: los mensajes al cliente no salen.' : '';
+  banner.hidden = !banner.textContent;
 }).catch(() => {});
 draw(); setInterval(draw, 2000);
 </script>

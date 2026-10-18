@@ -1,0 +1,103 @@
+{
+ "account": {
+  "id": 2,
+  "name": "Zolvion"
+ },
+ "additional_attributes": {},
+ "content_attributes": {},
+ "content_type": "text",
+ "content": null,
+ "conversation": {
+  "additional_attributes": {},
+  "can_reply": true,
+  "channel": "Channel::Whatsapp",
+  "contact_inbox": {
+   "id": 1141956389,
+   "contact_id": 1138372182,
+   "inbox_id": 147531,
+   "source_id": "573001112233",
+   "created_at": "2026-10-16T20:55:49.058Z",
+   "updated_at": "2026-10-16T20:55:49.058Z",
+   "hmac_verified": false,
+   "pubsub_token": "test-token"
+  },
+  "id": 1,
+  "inbox_id": 147531,
+  "labels": [],
+  "meta": {
+   "sender": {
+    "additional_attributes": {},
+    "custom_attributes": {},
+    "email": null,
+    "id": 1138372182,
+    "identifier": null,
+    "name": "Ana Prueba",
+    "phone_number": "+573001112233",
+    "thumbnail": "",
+    "blocked": false,
+    "contact_type": "lead",
+    "type": "contact"
+   },
+   "assignee": null,
+   "assignee_type": null,
+   "team": null,
+   "hmac_verified": false
+  },
+  "status": "open",
+  "custom_attributes": {},
+  "snoozed_until": null,
+  "unread_count": 1,
+  "first_reply_created_at": null,
+  "priority": null,
+  "waiting_since": 1792184149,
+  "agent_last_seen_at": 1792185630,
+  "contact_last_seen_at": 0,
+  "last_activity_at": 1792185643,
+  "timestamp": 1792185643,
+  "created_at": 1792184149,
+  "updated_at": 1792185643.211695,
+  "account": {
+   "id": 2,
+   "name": "Zolvion"
+  }
+ },
+ "created_at": "2026-10-16T21:20:43.202Z",
+ "id": 927581996,
+ "inbox": {
+  "id": 147531,
+  "name": "Demostración Restaurante"
+ },
+ "message_type": "incoming",
+ "private": false,
+ "sender": {
+  "account": {
+   "id": 2,
+   "name": "Zolvion"
+  },
+  "additional_attributes": {},
+  "avatar": "",
+  "custom_attributes": {},
+  "email": null,
+  "id": 1138372182,
+  "identifier": null,
+  "name": "Ana Prueba",
+  "phone_number": "+573001112233",
+  "thumbnail": "",
+  "blocked": false,
+  "contact_type": "lead"
+ },
+ "source_id": "wamid.TEST005",
+ "attachments": [
+  {
+   "id": 100317600,
+   "message_id": 927581996,
+   "file_type": "location",
+   "account_id": 2,
+   "coordinates_lat": 8.2345185,
+   "coordinates_long": -73.3556451,
+   "fallback_title": "",
+   "data_url": null
+  }
+ ],
+ "event": "message_created"
+}

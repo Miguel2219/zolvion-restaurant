@@ -38,8 +38,9 @@ references in its comments mean.
    `order_transitions`. That table is never updated or deleted from (except the reset).
 9. **Staff reject/cancel, receipt discards and cash discards need a reason.** The customer
    receives it for the first three; a cash discard tells nobody and the reason stays on the row.
-10. **Webhook signature is checked on the raw body before anything else** (when
-    `WHATSAPP_APP_SECRET` is set).
+10. **Webhook signature is checked on the raw body before anything else**: always for
+    Chatwoot (`chatwoot.verify`, signed timestamp within 5 minutes); for Meta when
+    `WHATSAPP_APP_SECRET` is set. A webhook only stores what arrived; the worker answers.
 11. **The system decides, not the model.** Whether a change edits the order or goes to a
     person is decided in code by the order's column (`_edit`, the `request_handoff`
     topic gate). The order's and payment's state reach the model from ESTADO REAL on
