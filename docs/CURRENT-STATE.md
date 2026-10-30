@@ -1,9 +1,10 @@
 # Current state
 
-Snapshot: code last changed 2026-10-17 on branch `feature/d-whatsapp-chatwoot`: Task D
-Part 2 connects WhatsApp through Chatwoot (Zolvion is the inbox's Agent Bot) and removes the
-simulator; Part 1 (2026-10-15) moved the database to PostgreSQL. Tests run 2026-10-18: 356
-pass, 1 expected failure (G16). Notion checklists ✅: Task A 2026-09-23, Tasks B and C
+Snapshot: code last changed 2026-10-21 on branch `feature/task-e`: Task E (changes after
+acceptance, the staff's Editar, durable notices, G43, photos, voice notes, sticker answers,
+location, files) is
+coded and waits for its hand test; Task D (WhatsApp through Chatwoot, PostgreSQL) is merged
+into `main`. Tests run 2026-10-22: 444 pass, 1 expected failure (G16). Notion checklists ✅: Task A 2026-09-23, Tasks B and C
 2026-09-30, Task C2 Part 1 2026-10-06, Task C2 Part 2 2026-10-11, Task D Part 2 2026-10-18
 (16/16, local self-hosted Chatwoot, pure Cloud API number) (Bogotá time).
 
@@ -13,8 +14,8 @@ pass, 1 expected failure (G16). Notion checklists ✅: Task A 2026-09-23, Tasks 
 
 ### Customer side (WhatsApp, through Chatwoot)
 
-- Several messages in a row get one answer: the bot waits `MESSAGE_WAIT_SECONDS` (4) after
-  the last one. A photo is answered on its own.
+- Several messages in a row get one answer: the bot waits `MESSAGE_WAIT_SECONDS` (6) after
+  the last one. A photo or a sticker is answered on its own.
 - The bot answers only while the conversation is Pending in Chatwoot. Staff take over by
   opening it or replying, and give it back with Pending or "Ya lo atendí"; the bot then reads
   what was said meanwhile (`CHATWOOT-SETUP.md` §6).
@@ -28,13 +29,20 @@ pass, 1 expected failure (G16). Notion checklists ✅: Task A 2026-09-23, Tasks 
   partial match), unknown zone = default fee.
 - Summary → the customer's "sí" → the order appears in Nuevos.
 - A change before the restaurant accepts updates **the same order** (same code, same
-  card, "Actualizado"). After acceptance the change goes to a person (amber box).
+  card, "Actualizado"). After acceptance the bot shows a proposal with the new total; on
+  the customer's "sí" an authorized drink is added at once, anything else waits on the card
+  for the restaurant to accept or reject (`ORDER-LIFECYCLE.md` §3). Code-built messages.
 - A separate order while the first one is accepted (warns about a second delivery fee).
 - Cancel by chat before acceptance; after acceptance it goes to a person.
 - "Quiero hablar con una persona": asks the reason once; a covered reason runs its tool;
   anything else opens the amber box when the customer has a card.
-- Voice notes, stickers and locations get an answer (asks to write it, or uses the
-  address) instead of an error. Tested only in code so far; a real phone is `TEST.md` Part B.
+- A photo is checked as a receipt only if the reader does not say it isn't one; any other
+  photo the bot answers like a message, with its caption. Voice notes are transcribed
+  (ElevenLabs) and handled like typed text; an unclear one gets "please repeat or write it".
+  The bot sees stickers; a 👍/👎 answers the one yes/no question it was shown (confirm the
+  summary or a change, discard a change; never cancels, never payment). A shared pin is kept
+  for the driver's map; a PDF or video with a live order gets "send it as a photo". After a
+  finished order the bot starts a fresh conversation (G43).
 - Payment: cash, transfer or mixed (split validated by code), or inferred from a clean
   receipt. Every receipt image is its own row with its own checks. Cash registered by
   staff counts toward what is owed by transfer. The bot says "received, a person will
@@ -45,8 +53,8 @@ pass, 1 expected failure (G16). Notion checklists ✅: Task A 2026-09-23, Tasks 
   that speaks about payment is checked before it goes out (`payments.md` §7). A payment
   question reads the state fresh; a delivered or cancelled order's payment is "not verified".
 - Automatic messages: accepted, ready (pickup), out for delivery; AI-written messages for
-  staff reject/cancel and discarded receipts, from the staff's reason; a code-built
-  message when staff confirm a receipt.
+  staff reject/cancel and discarded receipts, from the staff's reason; code-built messages
+  when staff confirm a receipt, edit an order or decide a change request.
 
 ### Staff panel (`/kitchen`, also `/`)
 
@@ -54,8 +62,10 @@ pass, 1 expected failure (G16). Notion checklists ✅: Task A 2026-09-23, Tasks 
   Orders waiting for the customer's "sí" are not shown.
 - Buttons per column; reject/cancel need a reason (`ORDER-LIFECYCLE.md` §2).
 - Tags: method, receipt status ("Sin comprobante" only on transfer/mixed), Sin pagar /
-  Pago incompleto · faltan $X / Pago completo, Efectivo por cobrar, Sobrepago,
-  Actualizado, pedido aparte, delivery fee.
+  Pago incompleto · faltan $X / Pago completo, Efectivo por cobrar, Sobrepago, Acordar pago,
+  Actualizado (any column), pedido aparte, delivery fee, 📍 Ver en el mapa, Aviso no enviado.
+- **Editar** on every card; «✏️ Cambio solicitado» with Aceptar cambio / Rechazar; «➕ El
+  cliente agregó …» with Visto; «⚠ Avisos sin enviar» in the header with Reenviar.
 - "Pagos" block: receipts and cash registrations, oldest first. A receipt row has time,
   amount, status, 👁 photo, grey notes, red box with reasons, Confirmar and ✕ while it waits
   for a person; a cash row has time, amount, "Efectivo recibido" and ✕. ✕ needs a reason; a
@@ -93,13 +103,13 @@ Each task has a Notion "Task X Plan" checklist that Miguel tests by hand (`WORKF
 | C2 Part 1 | Fixes for the 1 Oct code review, R1–R12 and R3b (§3): cash counts toward what is owed by transfer, confirm message, a modifier added twice, non-text messages, Spanish errors, order creation in one transaction, replies cleaned of the order code and "cocina", stop instruction, last model call, amounts typed by staff. Follow-up (4 Oct): R2a and R7 failed the first manual run; the bot's payment text was fixed | Done: 18/18 ✅ (263 tests). Re-runs 4 and 6 Oct |
 | C2 Part 2 | "Pagos" block: one row per cash registration, ✕ to discard a receipt or cash (reason; a method only cash set goes back with the last cash row), no cash warning; code-built payment sentence copied verbatim and checked at the end of every turn (G29, G30, R1 wording; Gaps 1–7 decided 7 Oct); "Cómo pagaron" by money received (G27). Follow-up (8 and 13 Oct): two models, Haiku first when `ANTHROPIC_MODEL` is empty | Done: 8/8 ✅ 2026-10-11 (306 tests; 13 of the 21 planned rows left to automated tests) |
 | D | Integration only (decided 2026-10-14). Part 1: SQLite → PostgreSQL. Part 2: WhatsApp through a Chatwoot inbox (pure Cloud API or Coexistence; Chatwoot Cloud or self-hosted); Zolvion is its Agent Bot and answers only while a conversation is Pending; a handoff hands it to a person; consecutive messages answered together; a worker thread answers (webhooks only store); "ver conversación" on the card; simulator removed. Step 0 (16 Oct) recorded 84 real Chatwoot events | Part 1 coded 2026-10-15. Part 2: Done, 16/16 ✅ 2026-10-18 (356 tests) |
-| — | Planned as its own task: a notifications bell, so a customer with no card who asks for a person reaches someone | Not started |
-| — | Moved out of Task D (2026-10-14): staff editing an order from the panel, also after the restaurant accepted it | Not started |
-| — | After Task D: voice-note transcription, real handling of stickers and locations, more image handling, quoted replies, deploying to a server, a live Coexistence test | Not started |
+| E | Before looking for the first client (decided 2026-10-21): changes after acceptance (an authorized drink added on the customer's "sí"; anything else a request staff accept or reject on the card, revision-guarded); staff **Editar** on every card; notices saved with their change and resendable; G43; wait 6 s; photos classified (caption kept), stickers seen, pin on the card, files ask for a screenshot. Addendum (same day): voice notes transcribed (ElevenLabs Scribe v2), stickers answer the one pending yes/no question. A GPT review of the plan (`outputs/task-e-review.md`) was checked gap by gap | Coded 2026-10-21 on `feature/task-e` (444 tests; quoted replies added 2026-10-22). Notion "Task E Plan" (50 rows) not run yet |
+| — | Only if a client in production asks: a notifications bell (G23) | Not planned |
+| — | After the first client says yes: server, login, backups; opening hours, delivery on/off, timers; a live Coexistence test | Not started |
 
 Task B rows about the "Llegó otro comprobante…" box and "Confirmar pago manualmente"
 describe behaviour that Task C replaced. Only what is written here is known about the
-bell and the tasks after D; their scope is Miguel's decision.
+tasks after E; their scope is Miguel's decision.
 
 ---
 
@@ -138,7 +148,9 @@ cases**, all passing (Task D Part 1 dropped 4 tests of the SQLite upgrade steps 
 4 Oct follow-up, **54 cases**: 53 pass, and `test_g16_order_code_loop_is_bounded` stays an
 expected failure (G16, out of scope); R5 and R9 now go through the worker.
 `tests/test_chatwoot.py` (Task D Part 2): **48 cases** on the Chatwoot integration, with
-recorded events and a fake Chatwoot. They run on PostgreSQL (`tests/conftest.py`).
-Together **356 passed, 1 xfailed** (2026-10-17; the warnings are FastAPI's `on_event` and
+recorded events and a fake Chatwoot. `tests/test_task_e.py` (Task E): **76 cases** (changes
+after acceptance, Editar, notices, G43, photos, voice notes, stickers, location, files; two Task B tests
+of the old window-3 handoff were rewritten for proposals). They run on PostgreSQL
+(`tests/conftest.py`). Together **444 passed, 1 xfailed** (2026-10-22; the warnings are FastAPI's `on_event` and
 one from Starlette's test client, G10). No AI calls happen in tests. Areas:
 `BUILD-AND-RUN.md` §5.

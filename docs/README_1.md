@@ -1,13 +1,13 @@
-# Zolvion Restaurant — MVP
+# Zolvion Restaurant
 
 Start here. This file says what the system is, why it exists, and which document answers
 which question.
 
-Snapshot these docs describe: code last changed **2026-10-17**, Task D Part 2 (WhatsApp
-through Chatwoot, on top of Part 1's PostgreSQL; local folder
-`C:\Users\PC\Desktop\zolvion-demo`, git branch `feature/d-whatsapp-chatwoot`), with 356
-automated tests passing and 1 expected failure (G16); Notion task checklists A, B, C, C2
-Part 1, C2 Part 2 and D Part 2 all ✅.
+Snapshot these docs describe: code last changed **2026-10-21**, Task E (changes after
+acceptance, the staff's Editar, notices, photos, voice notes, stickers, location; local folder
+`C:\Users\PC\Desktop\zolvion-demo`, git branch `feature/task-e`, on top of Task D merged
+into `main`), with 448 automated tests passing and 1 expected failure (G16); Notion task
+checklists A, B, C, C2 Part 1, C2 Part 2 and D Part 2 all ✅; Task E's not run yet.
 Anything newer is not reflected here until the docs are updated.
 
 ---
@@ -35,8 +35,9 @@ customer as *usted*.
 
 ## 2. Why it exists
 
-Miguel sells this as a SaaS to restaurants. This MVP is what gets demoed to restaurant
-owners and, once it runs reliably, what the first restaurants use.
+Miguel sells this as a SaaS to restaurants. It is the product, not a demo: what Miguel
+shows restaurant owners and what the first restaurants use. What is still missing
+(`KNOWN-GAPS.md`) is added when a client needs it or asks for it.
 
 - Launch city: **Ocaña** (Norte de Santander).
 - Test restaurant: **Caseritas Burger**, a burger restaurant in Bucaramanga owned by a
@@ -45,23 +46,17 @@ owners and, once it runs reliably, what the first restaurants use.
 - The demo's behaviours are default rules; each business will adjust them through its
   own configuration.
 
-## 3. This project vs. `zolvion-restaurant`
+## 3. Name and history
 
-| | `zolvion-restaurant` | This MVP (`zolvion-demo` folder) |
-|---|---|---|
-| What it is | Full target architecture: SQS FIFO, ECS Fargate, RDS Postgres, Terraform, React kitchen display | One FastAPI process with a worker thread, PostgreSQL, Chatwoot for WhatsApp, static HTML panels, Claude with tool use |
-| Status | Documented design, not being built as part of this MVP | **The product.** This is the system being sold and completed |
-| Reference for behaviour | No: its rules are not the reference here | Yes: decisions taken here are final for the MVP |
-
-Consequences:
-
-- Do not import rules, states or architecture from `zolvion-restaurant` unless Miguel
-  asks. Example: that design cancels and recreates an order on a change; this MVP edits
-  the same order in place. Never copy code from here into that repo.
-- The repo's `CLAUDE.md`, `run.md` and `app/main.py` describe the code as the MVP.
-- Code comments cite documents that only exist in `zolvion-restaurant` (`payments.md`,
-  `order-modification.md`, "R3", "R9", "Invariant 6", …) and task-plan labels (Q1–Q3,
-  D3). `rules.md` §4 explains each one so nobody has to go looking for them.
+- The code lives on GitHub in `Miguel2219/zolvion-restaurant`; the local folder keeps its
+  old name, `zolvion-demo`.
+- An earlier design (SQS queues, AWS ECS, Terraform, a React panel) was dropped on
+  2026-10-21. It is not a reference: decisions taken here are final. Do not bring back its
+  states or rules (for example `IN_PREPARATION`, or cancel-and-recreate on an edit) unless
+  Miguel asks.
+- Code comments still cite that design's document names ("R3", "R9", "Invariant 6",
+  `order-modification.md`, …) and task-plan labels (Q1–Q3, D3). `rules.md` §4 explains
+  each one; the documents themselves no longer exist.
 
 ## 4. Source of truth
 
@@ -96,7 +91,8 @@ script), `TEST.md` (manual regression script).
 
 - Notion: "Zolvion - Demo Documentation" —
   https://app.notion.com/p/Zolvion-Demo-Documentation-3e4ee8d8c287804dbe69f9c25fa115ff
-  › Tasks (Task A, B, C Plan; Bug Check; Task C2 Plan Parts 1 and 2; Task D Plan Part 2) —
+  › Tasks (Task A, B, C Plan; Bug Check; Task C2 Plan Parts 1 and 2; Task D Plan Part 2;
+  Task E Plan) —
   https://app.notion.com/p/3e4ee8d8c28780c9a1a8fc08b4d861f9
-- Full-architecture repo (not this MVP): https://github.com/Miguel2219/zolvion-restaurant
-- The MVP folder is a local git repository with no remote yet (`KNOWN-GAPS.md` G7).
+- Code: https://github.com/Miguel2219/zolvion-restaurant (this folder's `origin`; Task D
+  was merged there as PR #2, 2026-10-18). The database has no backup (`KNOWN-GAPS.md` G7).

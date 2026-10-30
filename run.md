@@ -1,8 +1,7 @@
-# Caseritas demo — step by step
+# Running Zolvion — setup and demo day
 
-This is the MVP of Zolvion Restaurant, not the full architecture: that design (queue,
-worker, Postgres, Terraform) lives in `zolvion-restaurant`. Never copy code from here
-into that repo.
+Zolvion as it runs today: one process on your laptop, plus Chatwoot in Docker. The menu in
+`config/restaurant.json` is Caseritas Burger, the test restaurant.
 
 Do the steps in order. Do not skip step 4: if the tests and the panel work before
 WhatsApp is connected, a later failure is the connection, not your code.
@@ -51,7 +50,7 @@ checked.
 
 ## Step 4 — Check before connecting (5 min) — do not skip
 
-`python -m pytest tests -q` → **356 passed, 1 xfailed**. Open
+`python -m pytest tests -q` → **448 passed, 1 xfailed**. Open
 http://localhost:8000/kitchen (staff panel) and http://localhost:8000/reports (owner's
 reports): both load, the panel says WhatsApp is not connected. There is no simulator: the
 customer side is a real phone from Step 7. **If anything fails here, fix it now.**
@@ -131,19 +130,20 @@ then **restart**. No code changes: that file is the product (`docs/CONFIG.md`).
 - [ ] **Recorded a full run as a video**: your backup, and your asset for the next client
 - [ ] Laptop charger
 
-## What this demo does NOT do
+## What it does NOT do yet
 
-Say this if he asks. Honesty buys more credibility than the demo itself.
+Say this if they ask. Honesty buys more credibility than the demo itself. Each one is added
+when a client needs it (`docs/KNOWN-GAPS.md`).
 
-- No queue, no AWS: one process on your laptop, plus Chatwoot in Docker.
+- No server yet: one process on your laptop, plus Chatwoot in Docker.
 - No timers: carts do not expire, unanswered orders do not die.
 - Chat history is in memory: restarting uvicorn makes the bot forget the conversation.
   Orders and reports survive (PostgreSQL).
 - No staff login, no multi-branch, no printer.
+- Voice notes are transcribed only with `ELEVENLABS_API_KEY` in `.env`; without it the bot
+  asks the customer to write. Try a few real notes before the demo (accents, noise: G45).
 - The 10-minute "unaccepted order" alert will not fire in a 6-minute demo. To show it,
   open `/kitchen?alert=20`: it fires after 20 seconds.
-
-The full design for all of that is `zolvion-restaurant`.
 
 ## Where the menu came from
 

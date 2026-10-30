@@ -36,7 +36,8 @@ os.environ["DATABASE_URL"] = TEST_URL
 # The tests never reach a real Chatwoot: .env may hold one, and app/__init__.py would load
 # it (it never overrides a variable that is already set, even to ""). Chatwoot tests set
 # their own values with monkeypatch.
-for name in ("CHATWOOT_URL", "CHATWOOT_ACCOUNT_ID", "CHATWOOT_BOT_TOKEN", "CHATWOOT_BOT_SECRET"):
+for name in ("CHATWOOT_URL", "CHATWOOT_ACCOUNT_ID", "CHATWOOT_BOT_TOKEN", "CHATWOOT_BOT_SECRET",
+             "ELEVENLABS_API_KEY"):    # nor a real transcriber: voice tests set their own
     os.environ[name] = ""
 
 try:

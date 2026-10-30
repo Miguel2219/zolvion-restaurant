@@ -5,8 +5,7 @@
 - **Part C** — regression by area, after any change. Each line: what to do → what you see.
 - **Part D** — automated tests.
 
-The full per-task checklists, with Miguel's verdicts, are the Notion pages
-"Task A/B/C Plan" and "Task C2 Plan" Parts 1 and 2 (Zolvion - Demo Documentation › Tasks).
+The full per-task checklists, with Miguel's verdicts, are the Notion "Task X Plan" pages.
 Expected totals come from `config/restaurant.json`: change a price and they change too.
 
 ---
@@ -46,8 +45,7 @@ exact agreed amount (an old screenshot is red: it predates the order). → row "
 recibido", no red box; the bot says it was received and a person will review it. Press
 **Confirmar** on the row → "Comprobante confirmado" and the customer gets a message.
 
-**A9 · Reuse.** The same screenshot on another order → red "Este comprobante ya fue usado
-antes (referencia …)".
+**A9 · Reuse.** The same screenshot on another order → red "…ya fue usado antes (referencia …)".
 
 **A10 · Reports.** `/reports` → sales, orders, average ticket, top item, how they paid,
 pickup vs delivery, lost orders, receipts flagged / awaiting, all from what you just did.
@@ -59,13 +57,12 @@ pickup vs delivery, lost orders, receipts flagged / awaiting, all from what you 
 3. Reply from Chatwoot on a Pending conversation → Open, the phone gets no bot; Pending → the bot
    answers without repeating the person. A C3 box → private note, Open; "Ya lo atendí" → Pending.
 4. Messages that are not text (R5), one by one:
-   - **Voice note** → the bot says it can't listen to voice notes, asks you to write it and
-     carries on with the order; it never acts as if it understood.
-   - **Sticker** → the same, for stickers.
-   - **Location with an address** (pick a place) → it uses that address for delivery, asks
-     for the barrio if you didn't say it, and never invents an address from the coordinates.
-   - **Location without an address** (a dropped pin) → it asks for the written address
-     (street, number, barrio).
+   - **Voice note** (`ELEVENLABS_API_KEY` set) → same answer as typing it; a noisy or silent
+     one → it asks to repeat or write it, never acts as if it understood.
+   - **Sticker** → a natural reply; 👍 right after a summary or a proposal answers it, 👎 never cancels.
+   - **Location** (a place or a dropped pin) → it asks the barrio and the address or a reference,
+     never writes coordinates nor invents one; a delivery card shows «📍 Ver en el mapa».
+   - **PDF** with a live order → it asks for the receipt as a photo or a screenshot.
    - **👍 reaction** on a bot message → no reply at all, and no error in the uvicorn window.
 
 | What you see in the uvicorn window | Meaning |
@@ -96,13 +93,15 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
   (Queso, Queso)"; the bot mentions no problem with the queso.
 - 1 Caserita + 1 Caserita sin cebolla, `déjeme dos caseritas` → the bot asks which line,
   without ids; only the chosen line changes. A line that does not exist → it says so.
-- Reports › "Pedidos que no se concretaron" stays at zero after these edits.
 
-### C2 · After Aceptar (goes to a person)
-- `Quiero cambiar la gaseosa por una cerveza` → the bot says a person will contact them,
-  promises nothing; amber "🙋 Necesita a una persona" box; the order is unchanged.
-- Repeating the same request adds no second line; "Ya lo atendí" clears the box and sends
-  nothing; cancelling an accepted order also goes to the box.
+### C2 · After Aceptar (Task E: proposals, requests, Editar)
+- Recibidos, `agrégueme una gaseosa personal` → price and new total, «¿Lo agregamos?»; `sí` →
+  same card, «➕ El cliente agregó…» until Visto; the phone gets the order as it is now.
+- `Cámbieme la caserita por una madurita` → «¿Se lo envío al local?»; `sí` → «✏️ Cambio
+  solicitado»; Aceptar cambio or Rechazar (reason) → the customer is told. In Listos even a
+  drink is a request; En camino needs «Ya coordiné con el domiciliario…».
+- **Editar** on any card → «Revisar cambios» shows the exact message → Guardar.
+- Cancelling an accepted order goes to the amber box; "Ya lo atendí" sends nothing.
 - A new, separate order → a second card; for delivery the bot warns of a second fee.
 
 ### C3 · "Quiero hablar con una persona"
@@ -123,7 +122,7 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
 - No message ever shows `P-1234`, the word "cocina", or says the bot confirmed a payment.
 
 ### C5 · Receipts (each one is its own row in "Pagos": time, amount, status, 👁)
-- 👁 opens the photo; click outside or Esc closes it.
+- 👁 opens the photo; click outside or Esc closes it. A food photo → no row; the bot answers it.
 - Add a gaseosa after a clean receipt → the bot asks for exactly $3.500 and shows the
   accounts; a $3.500 transfer → a second clean row. Another amount → only that row is red.
 - Same screenshot again on the same order → no new row; "ya lo teníamos" (if staff had
@@ -189,8 +188,8 @@ Restart uvicorn first (it clears the bot's chat memory). Suggested order: pickup
 
 ## Part D — automated tests
 
-`python -m pytest tests -q` → **356 passed, 1 xfailed** (B: 147, C: 210, C2 Part 1: 263,
-C2 Part 2: 310, D Part 1: 308, D Part 2: 356; the xfail is G16, out of scope).
+`python -m pytest tests -q` → **444 passed, 1 xfailed** (B: 147, C: 210, C2 Part 1: 263,
+C2 Part 2: 310, D Part 1: 308, D Part 2: 356, E: 444; the xfail is G16, out of scope).
 
 ## Before the demo
 

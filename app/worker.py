@@ -23,12 +23,12 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
-from . import brain, chatwoot, db, orders, wa
+from . import brain, chatwoot, db, orders, transcribe, wa
 from .money import fmt
 
 POLL_SECONDS = 0.5
 RETRY_SECONDS = 30
-DEFAULT_WAIT_SECONDS = 4.0
+DEFAULT_WAIT_SECONDS = 6.0
 CATCH_UP_LINES = 20
 
 INTERRUPTED_TEXT = (
@@ -109,9 +109,15 @@ def recover() -> int:
     return told
 
 
+QUEUED_GRACE_SECONDS = 15
+
+
 def run_once() -> bool:
     """One pass. True when a phone's messages were answered."""
     sync_chatwoot()
+    # Task E: a notice queued with its change and never sent (the app stopped after the
+    # commit) goes out now. A fresh one is left to whoever queued it.
+    wa.send_queued_for(older_than=_at(-QUEUED_GRACE_SECONDS))
     batch = _claim()
     if not batch:
         return False
@@ -141,11 +147,12 @@ def _claim() -> list[dict]:
 
 def _steps(rows: list[dict]) -> list[tuple[str, list[dict]]]:
     """Consecutive messages that are not photos go in one turn; a photo (a possible
-    receipt) is a step of its own. A sticker is not a photo (chatwoot.parse_customer)."""
+    receipt) is a step of its own, and so is a sticker (Task E: the bot sees it, and a
+    webp receipt is checked like a photo)."""
     steps: list[tuple[str, list[dict]]] = []
     texts: list[dict] = []
     for row in rows:
-        if row["kind"] == "image":
+        if row["kind"] in ("image", "sticker"):
             if texts:
                 steps.append(("text", texts))
                 texts = []
@@ -162,6 +169,12 @@ def _answer(rows: list[dict]) -> None:
     for kind, step in _steps(rows):
         status, error = "DONE", None
         try:
+            # Task E: a shared pin is kept whoever answers (also while a person has the
+            # chat), in arrival order, before this step's turn can create the order.
+            for row in step:
+                if row["kind"] == "location":
+                    with db.write_lock:
+                        orders.attach_location(phone, db.jloads(row["location"], None))
             if not chatwoot.bot_holds(phone):
                 status = "HUMAN"
                 if kind == "image":
@@ -203,35 +216,72 @@ def _bot_text(phone: str, rows: list[dict]) -> None:
     from . import main                     # main imports this module
 
     started = db.now()
-    parts, customer = [], False
+    # parts: what the bot reads; said: the same without the notes about quoted messages,
+    # so a payment word in a quoted message never counts as the customer's question.
+    parts, said, customer = [], [], False
+    has_order = orders.latest_for(phone, [*orders.EDITABLE, *orders.LOCKED]) is not None
     for row in rows:
-        note = main._note_for(_message(row), image_failed=False)
-        if note:
-            parts.append(note)
-        elif (row["body"] or "").strip():
-            parts.append(row["body"].strip())
-            customer = True
+        quote = main.quote_note(phone, row["reply_to"])
+        if quote:
+            parts.append(quote)             # right before the message that quotes it
+        if row["kind"] == "audio" and transcribe.enabled():
+            heard = _hear(row)
+            if heard.clear:
+                part = main.voice_text(heard.text)
+                customer = True             # the customer's own words, like typed text
+            else:
+                part = main.VOICE_NOTES.get(heard.reason, main.VOICE_NOTES["unclear"])
+        else:
+            part = main._note_for(_message(row), image_failed=False, has_order=has_order)
+            if not part and (row["body"] or "").strip():
+                part = row["body"].strip()
+                customer = True
+        if part:
+            parts.append(part)
+            said.append(part)
     text = "\n".join(parts) or main.EMPTY_MESSAGE_NOTE
+    words = "\n".join(said)
     catch_up = _catch_up(phone)
     if catch_up:
         text = f"{catch_up}\n\n{text}"
-    reply = main.handle(phone, text, None, rows[0]["received_at"], customer=customer)
+        words = f"{catch_up}\n\n{words}"
+    reply = main.handle(phone, text, None, rows[0]["received_at"], customer=customer, said=words)
+    # A notice the turn queued (an automatic addition) goes before the bot's reply.
+    wa.send_queued_for(phone)
     _deliver(phone, reply, rows[-1]["conversation_id"])
     if chatwoot.enabled():
         with db.write_lock:
             db.run("UPDATE conversations SET caught_up_at=%s WHERE phone=%s", (started, phone))
 
 
+def _hear(row: dict) -> transcribe.Heard:
+    """A voice note, downloaded and transcribed outside any lock or transaction. What
+    was heard is kept on the message (the text the bot acted on)."""
+    downloaded = _download(row)
+    if downloaded is None:
+        return transcribe.Heard("", False, "error")
+    heard = transcribe.transcribe(*downloaded)
+    if heard.text:
+        with db.write_lock:
+            db.run("UPDATE inbound_messages SET transcript=%s WHERE wa_message_id=%s",
+                   (heard.text, row["wa_message_id"]))
+    return heard
+
+
 def _bot_image(phone: str, row: dict) -> None:
     from . import main
 
     downloaded = _download(row)
-    if downloaded is None:
+    sticker = row["kind"] == "sticker"
+    if downloaded is None and sticker:
+        reply = brain.reply(phone, main._note_for(_message(row), image_failed=False), sticker=True)
+    elif downloaded is None:
         note = main._note_for(_message(row), image_failed=True)
         reply = main.handle(phone, note, None, row["received_at"], customer=False)
     else:
         image = wa.image_block(*downloaded)
-        reply = main.handle(phone, row["body"], image, row["received_at"])
+        reply = main.handle(phone, row["body"], image, row["received_at"], sticker=sticker)
+    wa.send_queued_for(phone)
     _deliver(phone, reply, row["conversation_id"])
 
 
@@ -267,10 +317,24 @@ def _receipt_for_staff(phone: str, row: dict) -> None:
         return
     downloaded = _download(row)
     if downloaded is None:
+        if row["kind"] == "sticker":
+            return
         note = (f"Zolvion · {order['code']}: el cliente envió una imagen y no se pudo "
                 "descargar para revisarla como comprobante.")
     else:
-        record = main.receive_receipt(order, wa.image_block(*downloaded), row["received_at"])
+        image = wa.image_block(*downloaded)
+        try:
+            extracted = brain.extract_proof(image)
+        except brain.NotConfigured:
+            raise
+        except Exception:  # noqa: BLE001 - a sticker the API refuses is just a sticker
+            if row["kind"] != "sticker":
+                raise
+            traceback.print_exc()
+            return
+        if not brain.is_receipt(extracted):
+            return                 # Task E: only a receipt gets a row and a note
+        record = main.receive_receipt(order, image, row["received_at"], extracted)
         note = staff_note(order, record)
     _private_note(row["conversation_id"] or chatwoot.conversation_for(phone), note)
 
@@ -300,6 +364,21 @@ def _private_note(conversation_id: int | None, text: str) -> None:
         print(f"!! Chatwoot no recibió la nota privada: {exc}", flush=True)
 
 
+def _finished_at(phone: str) -> str:
+    """G43 (Task E, review gap 6): with nothing live, when the phone's latest order
+    ended. What was written before belongs to that order and must not come back in the
+    catch-up note of a fresh conversation. "" when there is no such boundary."""
+    if orders.live_states(phone):
+        return ""
+    row = db.q1(
+        "SELECT t.at FROM orders o JOIN order_transitions t ON t.order_id = o.id"
+        " WHERE o.id = (SELECT id FROM orders WHERE phone=%s ORDER BY id DESC LIMIT 1)"
+        " ORDER BY t.id DESC LIMIT 1",
+        (phone,),
+    )
+    return (row or {}).get("at") or ""
+
+
 def _catch_up(phone: str) -> str | None:
     """What the customer and a person wrote while the person had the conversation, as
     one bracketed note for the bot's next turn, so it neither repeats nor contradicts
@@ -307,7 +386,7 @@ def _catch_up(phone: str) -> str | None:
     if not chatwoot.enabled():
         return None
     row = db.q1("SELECT caught_up_at FROM conversations WHERE phone=%s", (phone,))
-    since = (row or {}).get("caught_up_at") or ""
+    since = max((row or {}).get("caught_up_at") or "", _finished_at(phone))
     lines = [
         (r["received_at"], "Cliente: " + (
             f"«{r['body'].strip()}»" if r["kind"] == "text" and (r["body"] or "").strip()

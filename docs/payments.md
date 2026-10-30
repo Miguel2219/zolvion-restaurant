@@ -55,10 +55,15 @@ $X" (CASH and MIXED) and "Sobrepago $X".
 
 ## 3. When an image arrives (`main.handle` → `check_proof`)
 
-1. No live order → the image goes to the conversation like any message.
+1. No live order → the image goes to the conversation like any message, with its caption.
 2. Otherwise it lands on the **newest** live order (PENDING_CONFIRMATION…OUT_FOR_DELIVERY):
-   `extract_proof` (AI) → `check_proof` (code) → a new row with its own flags, notes,
-   OCR data, reference and photo → the bot gets a bracketed instruction.
+   `extract_proof` (AI) reads it and says `is_receipt`. Only a clear `false` keeps it out
+   (Task E): no row, the bot answers the photo and its caption, and asks to resend it as a
+   clear screenshot if the customer says it was a receipt (G44). Unsure or unreadable counts
+   as a receipt. A receipt → `check_proof` (code) → a new row with its own flags, notes, OCR
+   data, reference and photo → the bot gets a bracketed instruction (plus the caption).
+   A sticker (any `image/webp`) follows the same path; it never confirms money nor chooses a
+   method (it may only answer the one yes/no question pending, `ORDER-LIFECYCLE.md` §3).
 
 **Expected amount** (`_expected_for_new_receipt`). Registered cash comes off first:
 `left` = total − `cash_received`.
@@ -70,14 +75,14 @@ $X" (CASH and MIXED) and "Sobrepago $X".
 - Later receipt: `transfer_due`; nothing left to transfer on MIXED with cash owed →
   `cash_due`; nothing owed → red "No se esperaba otro pago."
 
-**Checks** (each failure adds a Spanish flag; any flag → `FLAGGED`): amount via
-`read_ocr_amount` (the one place AI output becomes a number; unreadable → flag); date within
-*order created − skew* … *message received + skew* (grey note past `proof_notice_minutes`);
-destination (exact digits or masked prefix + last four; holder name only when no number is
-shown); grey note "Llegó mientras otro comprobante está en revisión"; reference (unique
-index). On a repeated reference: same order and same readable amount = **resend** (no row);
-if that row was discarded the bot gives the staff's reason again, never "ya lo teníamos"
-(Gap 2); anything else → red "Este comprobante ya fue usado antes (referencia X)".
+**Checks** (each failure adds a Spanish flag; any flag → `FLAGGED`): amount via `read_ocr_amount`
+(the one place AI output becomes a number; unreadable → flag); date within *order created − skew*
+… *message received + skew* (grey note past `proof_notice_minutes`); destination (exact digits or
+masked prefix + last four; `*****7389` only with the holder; no number → holder by each word's
+visible start: `MIG***** PAB*****`, `MIGUEL PAB`); grey note "Llegó mientras otro comprobante está
+en revisión"; reference (unique index; none is no flag). Repeated reference, same order and amount
+= **resend** (no row; a discarded one: the staff's reason again, Gap 2); else red "Este comprobante
+ya fue usado antes (referencia X)". No reference: same amount and minute = same receipt (`_earlier_copy`).
 
 **What the bot is told:** red → there is a problem, a person will review it, never "paid".
 Clean → "recibimos su comprobante", a person will review it, the payment sentence (§7) to
@@ -93,7 +98,8 @@ copy as is, and never ask again how they will pay.
   receipt waits; otherwise "Quedan $A por transferir y $B por pagar en efectivo al recibir."
   (each part only if owed) and, with a transfer owed, "Cuando haga la transferencia,
   envíenos el comprobante."; then, only when confirmed receipts plus cash exceed the total,
-  "Vimos que envió $Y de más; el local se va a comunicar con usted por el excedente."
+  "Vimos que envió $Y de más; esa diferencia quedó anotada y puede pedirle al local que se la
+  devuelva." (no promise that someone calls: nothing makes a person do it, G33)
 - **✕ on a receipt** (`discard_receipt`): only `PROOF_RECEIVED`/`FLAGGED`; reason required
   (400 without it). The row leaves the card, keeps its reference (still refused on another
   order) and stays in ESTADO REAL as "descartado". The customer gets one model-written message
@@ -127,11 +133,16 @@ copy as is, and never ask again how they will pay.
 
 ## 6. When the order total changes (`follow_total`)
 
-Called inside `orders.amend`'s transaction; it only moves the agreed split. With no receipt
-that counts: CASH/TRANSFER follow the new total; MIXED keeps its transfer (the rest goes to
-cash) or, if the transfer now covers everything, resets to UNSPECIFIED and the bot asks
-again (`ask_method`). With a receipt that counts: TRANSFER moves to the new total, MIXED
-keeps its agreed transfer. What the customer hears is the payment sentence (§7).
+Called inside the transaction of every change to an order (`orders.amend`, and Task E's
+`orders.apply_target`: the staff's Editar, an accepted request, an automatic addition); it only
+moves the agreed split. With no receipt that counts: CASH/TRANSFER follow the new total; MIXED
+keeps its transfer (the rest goes to cash) or, if the transfer now covers everything, resets
+to UNSPECIFIED (`ask_method`). After the bot's own edit the bot asks again; after a Task E
+change the code-built message asks only if the bot could record the answer
+(`brain.method_lock_reason` is None), else it says «El local se comunicará con usted para
+acordar el pago.» and the card shows «Acordar pago» until staff register cash or confirm a
+receipt. With a receipt that counts: TRANSFER moves to the new total, MIXED keeps its agreed
+transfer. What the customer hears is the payment sentence (§7).
 
 ## 7. What the bot says about money
 
@@ -144,8 +155,8 @@ revisando un comprobante que nos envió y se comunicará con usted.» · then th
 necesita realizar otro pago.» (to_pay 0) / nothing (red receipt: no payment request) / «Falta
 por pagar $X.» (UNSPECIFIED) / «Quedan $A por transferir y $B por pagar en efectivo al
 recibir.» plus, with a transfer due, «Puede transferir a {cuentas}. Cuando transfiera,
-envíenos el comprobante.» · then «Pagó $S más que el total del pedido; el local se comunicará
-con usted por esa diferencia.» (confirmed surplus) or, for a surplus that counts a waiting
+envíenos el comprobante.» · then «Pagó $S más que el total del pedido; esa diferencia quedó
+anotada y puede pedirle al local que se la devuelva.» (confirmed surplus) or, for a surplus that counts a waiting
 receipt, «Con su comprobante pendiente, lo enviado supera el total del pedido; el local
 revisará la diferencia cuando lo confirme.» (no amount, never "pagó").
 
@@ -156,7 +167,8 @@ falta"…) forces `order_status` on the turn's first call.
 
 **The end-of-turn check** (`brain._finish_turn`) runs on every reply that speaks about
 payment: a draft that claims a payment status with no fresh read is replaced (forced
-`order_status`, then a new answer). The sentence must be in the reply; a missing one alone is
+`order_status`, then a new answer); so is a customer reply naming an amount that no current
+figure explains (`_stray_amount`). The sentence must be in the reply; a missing one alone is
 appended. A contradiction ("ya está pagado" while owed, "falta" while nothing is owed or a
 receipt is red), an earlier sentence a later change made stale, or an amount that does not
 match what its clause says it is (owed by transfer = `transfer_due`, in cash = `cash_due`,

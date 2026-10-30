@@ -43,11 +43,14 @@ again. Anything not in `orders.TRANSITIONS` raises `IllegalTransition` (HTTP 409
 | Listos | READY | Entregado (pickup) or Sale a domicilio (delivery) · Volver a preparar |
 | En camino | OUT_FOR_DELIVERY | Entregado |
 
-PENDING_CONFIRMATION orders have no column. Per card: "Actualizado HH:MM" when a Nuevos
-order changed after confirmation; "pedido aparte" for a separate order; the "Pagos"
-block (receipts with Confirmar, ✕ and 👁; cash rows with ✕; `payments.md` §2); "Registrar
-efectivo recibido" while money is outstanding; the amber handoff box; a red pulse once a Nuevos
-order is older than 600 s from creation (`?alert=N` changes it).
+Every card also has **Editar** (§3, Task E). PENDING_CONFIRMATION orders have no column.
+Per card: "Actualizado HH:MM" when the order changed after the customer's "sí" (any column);
+"pedido aparte" for a separate order; «📍 Ver en el mapa» on a delivery order with the
+customer's pin; «Acordar pago» (§3); the "Pagos" block (receipts with Confirmar, ✕ and 👁; cash
+rows with ✕; `payments.md` §2); "Registrar efectivo recibido" while money is outstanding;
+«➕ El cliente agregó …» with Visto; «✏️ Cambio solicitado» with Aceptar cambio / Rechazar; the
+amber handoff box; «Aviso no enviado»; a red pulse once a Nuevos order is older than 600 s from
+creation (`?alert=N` changes it). The header shows «⚠ Avisos sin enviar (N)» when a notice failed.
 
 ## 3. Changing an order: the windows
 
@@ -58,7 +61,7 @@ to items or delivery details (`add_item`, `remove_item`, `set_qty`, `create_orde
 |---|---|---|
 | 1 | An **open cart** exists | The cart changes. An open cart always wins, even next to a live order |
 | 2 | Latest order is PENDING_CONFIRMATION or CONFIRMED | `orders.amend` changes **the same order** (row, code, card), "Actualizado HH:MM". One transaction: items, totals and `payments.follow_total` land together or not at all |
-| 3 | Latest order is ACCEPTED, READY or OUT_FOR_DELIVERY | Locked. `_handoff` opens the amber box with a code-written summary; the bot says a person will contact the customer and promises nothing |
+| 3 | Latest order is ACCEPTED, READY or OUT_FOR_DELIVERY | A **proposal** (below): nothing changes until the customer says "sí"; then it applies on its own (AUTO) or waits for the restaurant on the card (APPROVAL) |
 | 0 | Nothing live | Normal new order |
 
 Details:
@@ -74,16 +77,56 @@ Details:
 - An edit that would leave the order empty is refused (`EmptyEdit`); the bot asks
   whether to cancel and never hands it off.
 - If staff accept between the check and the write, the guarded update fails
-  (`NotEditable`) and the request is handed off instead.
+  (`NotEditable`) and the change becomes a proposal instead.
 - `start_separate_order` (only in window 3) opens a cart with `related_order_id`; for
   delivery the bot warns of a second fee and trip. No rule reads that link.
 - Cancel by chat: before acceptance it cancels (`customer_declines` or
   `customer_cancels`) and opens a fresh cart; after acceptance it is handed off.
 - Payment-method changes: `payments.md` §1.
 
+### After acceptance (Task E, `changes.py`)
+
+The bot builds the target the order would become (a staging cart, never the customer's
+own) and shows it with the price and total code computed. The customer must write "sí"
+(`confirm_change`) or "no" (`discard_change`), typed or in a voice note. A 👍/👎 sticker
+counts only as the answer to the one question code knows was shown (`main._sticker`).
+
+| State | Route |
+|---|---|
+| ACCEPTED | **AUTO** when the change only adds products the menu marks `add_after_accept` (available, no modifiers, no note, same delivery): «Agregar 1× Gaseosa personal ($3.500). Su pedido quedaría en $X. ¿Lo agregamos?». Anything else, or a mix, is one **APPROVAL** request |
+| READY | APPROVAL (even a drink) |
+| OUT_FOR_DELIVERY | APPROVAL; changing to pickup is refused («El pedido ya va en camino…») |
+
+- AUTO on "sí": rechecked (order unchanged, still ACCEPTED, product still allowed), then
+  applied in one transaction with the payment split and the customer's notice; the card shows
+  «➕ El cliente agregó …» until Visto. A stale one is dropped and the bot asks again.
+- APPROVAL on "sí": `PENDING` on the card («✏️ Cambio solicitado», what changes, total now →
+  proposed). The order stays as it was. A new change from the customer reopens it (`PROPOSED`,
+  `revision` + 1) until they confirm again. One open request per order (a unique index).
+- **Aceptar cambio**: preview (the exact message and new total), then save. Refused when the
+  customer changed the request meanwhile (the revision), when the order changed after the
+  request, or when the order or its payment changed after the preview (the state token).
+  En camino needs «Ya coordiné con el domiciliario…»; Listos reminds «Si hay que preparar
+  algo, use Volver a preparar» (staff decide). **Rechazar** needs a reason.
+- An order that ends with a request waiting closes it; if it was delivered the customer gets
+  «El cambio que pidió no se alcanzó a hacer: su pedido ya fue entregado.»
+- Requests never open the amber box nor move the Chatwoot conversation.
+
+**Editar** (any card, Nuevos to En camino): products, quantities, modifiers, notes, address,
+barrio (fee from the zone table) and pickup ↔ delivery, plus «Quitar ubicación». «Revisar
+cambios» shows the exact WhatsApp message; «Guardar y avisar al cliente» saves only if the
+order and its payment are what the preview showed. En camino needs the driver box and can't
+become pickup; an empty order is refused (use Cancelar or Rechazar); no change → «No cambió
+nada». Saving closes an open request (the edit message covers it).
+
+After any applied change that undoes a MIXED split (`follow_total`'s `ask_method`): if the
+bot can record a method (`brain.method_lock_reason` is None) the message asks how they will
+pay; otherwise it says «El local se comunicará con usted para acordar el pago.» and the card
+shows «Acordar pago» until staff register cash or confirm a receipt.
+
 ## 4. Handoff to a person
 
-- `_handoff` (a locked change, cancel or payment-method change) and `request_handoff`
+- `_handoff` (a cancel after acceptance, or a payment-method change) and `request_handoff`
   with topic `OTHER` call `handoff.request`; an identical open request is not duplicated.
 - `request_handoff` is gated in code: topics `ORDER_CHANGE`, `CANCEL`, `PAYMENT_METHOD`,
   `ORDER_INFO` answer `NO SE PUDO` and name the tool to use instead, so the model can
@@ -110,7 +153,8 @@ Details:
 
 | Event | Message to the customer |
 |---|---|
-| ACCEPTED | "¡Recibimos su pedido! En un momento entra en preparación." |
+| ACCEPTED | With the minutes staff picked: "¡Recibimos su pedido! Tardará aproximadamente 20 minutos." (never a clock time); without, or after Volver a preparar: "¡Recibimos su pedido! En un momento entra en preparación." |
+| Cambiar tiempo (ACCEPTED) | "Disculpe la demora: a su pedido le faltan aproximadamente X minutos." / "Su pedido va más rápido: le faltan…"; nothing if it moved under 5 min |
 | READY, pickup | "Su pedido ya está listo para recoger." |
 | READY, delivery | Nothing; the "va en camino" message covers it |
 | OUT_FOR_DELIVERY | "Su pedido va en camino." |
@@ -120,6 +164,17 @@ Details:
 | Receipt confirmed by staff | Code-built message (`payments.md` §4) |
 | Receipt discarded by staff | One AI message from the reason, guarded; fixed template on failure |
 | Cash registered, or a cash row discarded | Nothing; ESTADO REAL and the payment sentence carry it when the customer asks |
+| Staff **Editar** | «El local actualizó su pedido. Así quedó:» + lines, delivery and payment sentence (code) |
+| AUTO addition | «Listo, agregamos …. Así quedó su pedido:» + the same (code), then a short bot reply |
+| Request accepted | «El local aprobó su cambio. Así quedó:» + the same (code) |
+| Request rejected | «El local no pudo hacer el cambio que pidió. Motivo: <reason>. Su pedido sigue igual.» |
+| Delivered with a request waiting | «El cambio que pidió no se alcanzó a hacer: su pedido ya fue entregado.» |
+
+The five Task E messages are queued in the same transaction as the change (`wa.queue`) and
+sent after the commit; one left by a crash is sent by the worker after 15 s. A failed one, or
+one sending for over 2 minutes, is listed under «⚠ Avisos sin enviar» for **Reenviar**: a
+message about the order goes out as the order is now, a template as it was. A message over
+3.900 characters is refused before anything is saved.
 
 No customer message may contain the order code (`P-1234`) or the word "cocina"; tests
 check every fixed notification. The bot's state answers come from ESTADO REAL

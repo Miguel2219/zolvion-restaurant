@@ -1,7 +1,7 @@
 # Known gaps
 
-What stands between the code at the snapshot (`README_1.md`, checked 2026-10-17 after Task
-D Part 2) and an MVP a restaurant can run every day. Every item was observed in the code,
+What stands between the code at the snapshot (`README_1.md`, checked 2026-10-21 for Task
+E) and an MVP a restaurant can run every day. Every item was observed in the code,
 the repo docs or the Notion checklists.
 
 These are **observations, not decisions.** Which ones get fixed, in what order and how
@@ -40,7 +40,7 @@ Numbers are never reused: a closed gap moves to §7 and keeps its number.
 | G14 | Outbound messages are not retried and nobody is alerted on failure (only Chatwoot status changes are retried) | A failed "su pedido va en camino" is only visible as `FAILED` in the database | `wa.send_text` |
 | G41 | A Zolvion that is down or slower than 5 s on a webhook: Chatwoot opens the conversation for a person and never resends that message | Fails safe (staff see it under Open), but the bot never reads that message, so its catch-up note lacks it | Chatwoot Agent Bot |
 | G42 | Who answers is read before each turn and again right before sending (minimal point 1), not during the send | A person who takes over in that same instant can still get one bot reply on top | `worker._deliver` |
-| G15 | Voice notes, stickers and locations now reach the bot as a note (`CURRENT-STATE.md` R5), but a voice note is not transcribed: the bot can only ask the customer to write it | Real customers send voice notes | `wa.parse_webhook`, `main._note_for` |
+| G45 | Voice-note accuracy on Colombian Spanish is not measured: no public benchmark covers it, and the 0.5 Spanish-probability threshold is a first guess | A misheard product or quantity shows in the summary (the customer still confirms it); tune with real notes | `transcribe.MIN_LANGUAGE_PROBABILITY` |
 | G16 | Order codes are 4 random digits, retried until unused, and never freed. An expected-failure test exists: `test_g16_order_code_loop_is_bounded` | Collisions slow down creation as orders pile up; after 10 000 orders the loop never ends | `orders._code` |
 | G34 | Payment messages force a fresh `order_status` call (`tool_choice` type `tool`), which Sonnet 5.5, Opus 5.5 and Fable 5.1 refuse with a 400. The chat model must be Haiku 5.5; an empty `ANTHROPIC_MODEL` picks Haiku first. Miguel plans to fix it before real use: code reads the order itself, so any model works | On a refusing model every payment message gets "Perdón, se me cruzaron los cables", and a newer chat model can't be used | `brain._payment_question`, `brain._answer_again` |
 
@@ -54,14 +54,14 @@ Numbers are never reused: a closed gap moves to §7 and keeps its number.
 | G20 | `/api/reload-config` only updates the bot's copy of the config | Prices can differ between what the bot sees and what carts, receipts and reports use until a restart | `main.reload_config` |
 | G21 | One restaurant per running process (one config, database, number) | Several clients = several processes, or a multi-restaurant design (a SaaS decision) | `catalog.CATALOG`, `db.DATABASE_URL` |
 | G22 | With two live orders (an accepted one plus a separate one), a receipt image always lands on the newest | A receipt meant for the first order is checked against the second | `main.handle` |
-| G23 | A customer with no card who asks for a person reaches nobody through the bot (staff can still take any conversation in Chatwoot) | The notifications bell is planned as its own task | `brain` `request_handoff` |
+| G23 | A customer with no card who asks for a person reaches nobody through the bot (staff can still take any conversation in Chatwoot) | The notifications bell is built only if a client in production asks (decided 2026-10-21) | `brain` `request_handoff` |
 | G35 | WhatsApp Coexistence (the restaurant's Business app on the same number) is not tested live; WhatsApp for Windows gets unlinked under it | The echo → takeover rule is built from Chatwoot's code, not from a recording | `chatwoot.classify` |
 | G37 | Reactions never reach Chatwoot, so never Zolvion; a customer's message edit was not available to test | A 👍 meaning "sí" gets no answer; an edited message would be ignored (`message_updated`) | Chatwoot |
-| G38 | A sticker arrives as a plain `image/webp`: any webp image is taken as a sticker | A receipt screenshot saved as webp is never checked; the bot says it can't see stickers | `chatwoot.parse_customer` |
-| G43 | The bot's chat memory keeps a delivered order: asked for "una caserita" right after one, it raised the new cart to 2 (hand test 18 Oct, P-7286 then a new cart; fine after «Reiniciar demo» cleared the memory) | A returning customer can get a wrong quantity shown in the summary (they can still correct it before "sí") | `brain._history`, `SYSTEM` |
+| G44 | The receipt reader says whether an image is a receipt (Task E); a real receipt read as «not a receipt» gets no row, and staff have no way to add one by hand | The bot asks the customer to resend it as a clear screenshot; until then the payment is not on the card | `brain.is_receipt`, `main.handle` |
 | G39 | After a resolve, Chatwoot Cloud starts a new conversation and a self-hosted inbox with "lock to single conversation" reopens the old one | Both work; the card's link opens the conversation the order was made in, which may be an older one | `chatwoot.remember`, `main.board` |
 | G25 | A receipt whose reference cannot be read can't be recognised as a resend; it is checked as a new receipt | Same screenshot twice may become two rows (Task C known gap) | `payments.check_proof` |
 | G31 | The bot can read "doble queso adicional" as one queso (P-5135, first R4 run); "una caserita con doble queso" worked (P-3545) | Code prices exactly what the model adds; here the bot showed the price and asked, so the customer could catch it | `brain.SYSTEM`, `add_item` |
+| G47 | A photo or sticker sent as a reply to a message gets no quote note (texts and voice notes do), and the catch-up note does not say what the customer quoted while a person had the chat | A receipt sent as a reply to the account message is still checked as usual; the bot just doesn't know which message it answered | `worker._bot_image`, `worker._catch_up` |
 | G32 | Cash registered on top of a clean receipt still waiting for a person: "Sobrepago" counts that receipt before anyone confirms the money arrived (`TEST.md` C7; kept as it is in C2 Part 2, which only stops the bot calling it money owed back) | The card can show a surplus for a transfer nobody has seen yet | `payments.current` (`overpayment_amount`) |
 
 ## 5. Reports
@@ -76,7 +76,6 @@ Numbers are never reused: a closed gap moves to §7 and keeps its number.
 
 - Without Chatwoot the customer's WhatsApp profile name is parsed but never stored; with
   Chatwoot the contact's name goes to `conversations.display_name`, which nothing shows yet.
-- An image's caption is dropped when the image is read as a receipt.
 - `run.md` "What this demo does NOT do" also lists: no staff login, no multi-branch, no
   printer. Those are feature decisions, not bugs.
 
@@ -92,3 +91,15 @@ Numbers are never reused: a closed gap moves to §7 and keeps its number.
   "six-minute demo"; the webhooks only store messages and a worker thread answers them, so
   the server keeps answering meanwhile; while a person has the conversation in Chatwoot the
   bot stays quiet.
+- G38, G43 (closed in code 2026-10-21, Task E; hand test pending): a webp image is still a
+  sticker, but the bot sees it and, with a live order, it is checked like any photo (not
+  verified with a real webp receipt); after a finished order the bot's history is cleared
+  once, so an old order no longer leaks into a new cart. An image's caption now reaches the
+  bot.
+- G15 (closed in code 2026-10-21, Task E addendum; hand test pending): voice notes are
+  transcribed by ElevenLabs Scribe v2 and handled like typed text (G45 tracks accuracy).
+- G46 (found and closed in code 2026-10-22, Task E; hand test on real WhatsApp pending,
+  Coexistence included): a reply that quotes an earlier message reached the bot as plain text,
+  so it answered against the latest context. Now the bot gets a note saying who wrote the
+  quoted message and what it said (a photo by date, and as a receipt when it was one, never
+  an amount); the payment question never reads it. Fields from recordings (`quote_*.json`).

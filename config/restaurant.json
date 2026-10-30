@@ -1,5 +1,5 @@
 {
-  "_comment": "Menu and prices taken from the Caseritas source in NotebookLM (WhatsApp Image 2026-09-18 PDF). VERIFY the prices with your cousin before the demo. Delivery zones, hours and payment accounts are TEST VALUES - the source does not contain them.",
+  "_comment": "Menu and prices taken from the Caseritas source in NotebookLM (WhatsApp Image 2026-09-18 PDF). VERIFY the prices with your cousin before the demo. Delivery zones, hours and payment accounts are TEST VALUES - the source does not contain them. add_after_accept (Task E): the customer can add that product on their own after the restaurant accepted the order; off unless set.",
   "business": {
     "name": "Caseritas Burger",
     "short_name": "Caseritas",
@@ -18,6 +18,7 @@
     "pickup": true,
     "delivery": true,
     "default_delivery_fee": 6000,
+    "prep_minutes": [15, 20, 30, 45],
     "delivery_zones": [
       { "name": "Cabecera", "fee": 5000 },
       { "name": "Sotomayor", "fee": 5000 },
@@ -79,12 +80,12 @@
         "id": "drinks",
         "name": "Bebidas",
         "items": [
-          { "id": "d_gaseosa_personal", "name": "Gaseosa personal", "price": 3500, "available": true, "description": "" },
-          { "id": "d_gaseosa_mini",     "name": "Gaseosa mini",     "price": 2500, "available": true, "description": "" },
-          { "id": "d_gaseosa_litro",    "name": "Gaseosa litro",    "price": 7000, "available": true, "description": "Para compartir" },
-          { "id": "d_soda_personal",    "name": "Soda personal",    "price": 3500, "available": true, "description": "" },
-          { "id": "d_cerveza_nacional", "name": "Cerveza nacional", "price": 5000, "available": true, "description": "" },
-          { "id": "d_cerveza_premium",  "name": "Cerveza premium",  "price": 7000, "available": true, "description": "" }
+          { "id": "d_gaseosa_personal", "name": "Gaseosa personal", "price": 3500, "available": true, "add_after_accept": true, "description": "" },
+          { "id": "d_gaseosa_mini",     "name": "Gaseosa mini",     "price": 2500, "available": true, "add_after_accept": true, "description": "" },
+          { "id": "d_gaseosa_litro",    "name": "Gaseosa litro",    "price": 7000, "available": true, "add_after_accept": true, "description": "Para compartir" },
+          { "id": "d_soda_personal",    "name": "Soda personal",    "price": 3500, "available": true, "add_after_accept": true, "description": "" },
+          { "id": "d_cerveza_nacional", "name": "Cerveza nacional", "price": 5000, "available": true, "add_after_accept": true, "description": "" },
+          { "id": "d_cerveza_premium",  "name": "Cerveza premium",  "price": 7000, "available": true, "add_after_accept": true, "description": "" }
         ]
       }
     ],

@@ -12,7 +12,7 @@ import traceback
 
 from anthropic import Anthropic
 
-from . import cart, db, handoff, orders, payments
+from . import cart, changes, db, handoff, orders, payments, wa
 from .catalog import CATALOG, _fold
 from .money import fmt
 
@@ -22,6 +22,8 @@ _proof_model = None
 _lock = threading.Lock()
 _history: dict[str, list] = {}
 HISTORY_TURNS = 24
+# G43 (Task E): the finished order after which a phone's history was already cleared.
+_fresh_after: dict[str, int] = {}
 
 # Haiku first: Sonnet 5.5 and Opus 5.5 refuse the forced order_status call that payment
 # questions make (a 400 on every payment message), and Haiku 5.5 accepts it.
@@ -116,16 +118,18 @@ REGLAS QUE NO PUEDES ROMPER:
 - Si el cliente quiere cambiar algo de su pedido, usa SIEMPRE las herramientas
   de siempre (add_item, remove_item, set_qty, y create_order para la forma de
   entrega o la dirección). El sistema decide: si el local todavía no lo ha
-  aceptado, cambia ESE MISMO pedido; si ya lo aceptó, se lo pasa a una
-  persona. Nunca uses request_handoff para un cambio y nunca hagas un pedido
-  nuevo para un cambio. Para cambiar un producto por otro, agrega primero el
-  nuevo y después quita el anterior.
+  aceptado, cambia ESE MISMO pedido; si ya lo aceptó, prepara una PROPUESTA con
+  el precio y el total que calcula el sistema. Copia la propuesta tal cual y
+  pregúntale al cliente. Sólo cuando diga que sí, usa confirm_change; si dice
+  que no, usa discard_change. Nunca digas que un cambio quedó hecho hasta que
+  una herramienta te lo diga. Nunca uses request_handoff para un cambio y nunca
+  hagas un pedido nuevo para un cambio. Para cambiar un producto por otro,
+  agrega primero el nuevo y después quita el anterior.
 - Si una herramienta te responde PASADO A UNA PERSONA, el local ya quedó avisado.
   Dile al cliente con amabilidad que una persona del local va a revisar su
   solicitud y se comunica con él. Hay dos casos:
-  · Si te respondió una herramienta de cambio (add_item, remove_item, set_qty,
-    create_order, cancel_order o choose_payment), el sistema no hizo el cambio.
-    No le prometas que el cambio se va a poder hacer.
+  · Si te respondió cancel_order o choose_payment, el sistema no hizo el
+    cambio. No le prometas que el cambio se va a poder hacer.
   · Si te respondió request_handoff (topic OTHER), el cliente no pidió ningún
     cambio. No le menciones ningún cambio.
 - Si el cliente pide hablar con una persona (alguien del local, un humano, un
@@ -264,6 +268,55 @@ def _payment_state(phone: str) -> str | None:
     return "- Pago del pedido más reciente: " + "; ".join(parts) + "."
 
 
+def _change_state(phone: str) -> list[str]:
+    """Task E: changes to the newest live order the chat history may not show: the
+    staff's Editar, a request waiting, the restaurant's decision. In words, no totals:
+    the bot reads the order itself with order_status."""
+    order = _payment_order(phone)
+    if order is None:
+        return []
+    lines = []
+    if order.get("edited_by") == "staff":
+        lines.append("- El local cambió este pedido desde el panel. Si necesitas ver qué lleva, "
+                     "usa order_status.")
+    request = changes.open_for(order["id"])
+    if request and request["status"] == "PROPOSED":
+        lines.append(f"- Hay un cambio propuesto que espera la respuesta del cliente: "
+                     f"{'; '.join(request['diff'])}. Si dice que sí, usa confirm_change; si dice "
+                     "que no, discard_change.")
+    elif request:
+        lines.append(f"- El cliente pidió un cambio ({'; '.join(request['diff'])}) y el local lo "
+                     "está revisando: todavía NO se aplicó. No digas que ya se hizo ni le cobres "
+                     "la diferencia.")
+    decided = changes.last_resolved(order["id"])
+    if decided and decided["status"] == "APPLIED":
+        lines.append(f"- El local aprobó el cambio que pidió el cliente "
+                     f"({'; '.join(decided['diff'])}); ya está aplicado.")
+    elif decided:
+        lines.append(f"- El local rechazó el cambio que pidió el cliente "
+                     f"({'; '.join(decided['diff'])}). Motivo: {decided['reason']}. El pedido "
+                     "sigue igual.")
+    return lines
+
+
+def _promise_state(phone: str) -> str | None:
+    """What is left of the staff's estimate for the newest live order, as code wrote it,
+    so «¿a qué hora llega?» has an answer the model only copies (rule 1). Only while it
+    is being made: once Listo, the order's state says the rest."""
+    order = _payment_order(phone)
+    if order is None or order["state"] != "ACCEPTED":
+        return None
+    left = orders.minutes_left(order)
+    if left is None:
+        return None
+    if left:
+        return (f"- Según el local, a este pedido le faltan {orders.minutes_text(left)}. Si "
+                "pregunta cuánto falta o a qué hora llega, dile eso tal cual; nunca des una "
+                "hora del reloj ni otro tiempo.")
+    return ("- El tiempo que el local calculó para este pedido ya pasó. Si pregunta, "
+            "discúlpate y dile que el local ya lo está terminando; no des otro tiempo.")
+
+
 def _real_state(phone: str) -> str:
     """What the orders really are right now, computed by code on every model call.
     Notifications and the panel's receipt confirmations never enter the chat
@@ -282,6 +335,10 @@ def _real_state(phone: str) -> str:
             f"- Pedido más reciente: {STATE_LABELS.get(latest['state'], latest['state'])}."
             if latest else "- No tiene pedidos."
         ]
+    lines += _change_state(phone)
+    promised = _promise_state(phone)
+    if promised:
+        lines.append(promised)
     payment = _payment_state(phone)
     if payment:
         lines += [payment, PAYMENT_RULES]
@@ -380,8 +437,8 @@ def payment_sentence(pay: dict, several_live: bool = False) -> str:
             )
     if pay["confirmed_overpayment"]:
         parts.append(
-            f"Pagó {fmt(pay['confirmed_overpayment'])} más que el total del pedido; el local "
-            "se comunicará con usted por esa diferencia."
+            f"Pagó {fmt(pay['confirmed_overpayment'])} más que el total del pedido; esa "
+            "diferencia quedó anotada y puede pedirle al local que se la devuelva."
         )
     elif pay["overpayment_amount"]:
         # G32: the surplus counts a receipt nobody confirmed. Never an amount owed back.
@@ -405,12 +462,52 @@ def payment_sentence_for(phone: str) -> str | None:
     return payment_sentence(order["payment"], len(orders.live_states(phone)) > 1)
 
 
+def method_lock_reason(order: dict) -> str | None:
+    """Why the bot can't record a new payment method for this order (a person must):
+    choose_payment hands those off. None: the bot can."""
+    payment = order["payment"]
+    if order["state"] == "OUT_FOR_DELIVERY":
+        return "el pedido ya va en camino y el domiciliario no ve el panel"
+    if payment["status"] != "PENDING":
+        return "el cliente ya envió un comprobante de pago"
+    if payment["cash_received"] > 0:
+        return "el local ya registró efectivo recibido para este pedido"
+    return None
+
+
+METHOD_QUESTION = "¿Cómo va a pagar: en efectivo, por transferencia o una parte de cada una?"
+AGREE_PAYMENT = "El local se comunicará con usted para acordar el pago."
+
+
+def order_message(order: dict, head: str, change: dict | None = None) -> str:
+    """A notice that says how the order is now (Task E: the staff's Editar, an accepted
+    request, an automatic addition, a resend). Code only: the lines, the delivery and
+    the payment sentence. When the change undid a mixed split (follow_total's
+    ask_method), it asks the method only if the bot can record the answer; otherwise
+    a person agrees it (decision 11)."""
+    if order["fulfilment_type"] == "DELIVERY":
+        delivery = (f"Entrega: a domicilio en {order['address']}." if order.get("address")
+                    else "Entrega: a domicilio.")
+    else:
+        delivery = "Entrega: recoge en el local."
+    parts = [head, _order_text(order), delivery]
+    pay = order.get("payment")
+    if pay:
+        sentence = payment_sentence(pay, len(orders.live_states(order["phone"])) > 1)
+        if sentence:
+            parts.append(sentence)
+        if (change or {}).get("ask_method"):
+            parts.append(METHOD_QUESTION if method_lock_reason(order) is None else AGREE_PAYMENT)
+    return "\n\n".join(parts)
+
+
 class _Turn:
     """What one bot turn did, for _finish_turn. Tools write into it (_run_tool runs
     inside the turn, under _lock)."""
 
-    def __init__(self, customer: bool = False, with_payment: bool = False):
+    def __init__(self, customer: bool = False, with_payment: bool = False, sticker: bool = False):
         self.customer = customer             # the customer's own text, not a system instruction
+        self.sticker = sticker               # the turn answers a sticker: it can't confirm anything
         self.needs_sentence = with_payment   # the reply must carry the payment sentence
         self.question = False                # the customer asked about payment
         self.status_question = False         # ...about whether it is paid or what is left
@@ -419,6 +516,7 @@ class _Turn:
         self.sentences: list[str] = []       # every payment sentence handed out in this turn
         self.actions: dict[str, str] = {}    # code-built confirmation of what was done
         self.code_text: list[str] = []       # code-built text of this turn (tool results)
+        self.proposal: str | None = None     # a change proposal still waiting for its answer
 
 
 _turn = _Turn()
@@ -563,6 +661,42 @@ def _code_amounts(phone: str) -> set[int]:
     return {amount for amount in found if amount}
 
 
+PAY_FIGURES = ("to_pay", "outstanding", "transfer_due", "cash_due", "cash_received", "confirmed",
+               "received", "paid", "unconfirmed_amount", "confirmed_overpayment")
+
+
+def _stray_amount(text: str, phone: str) -> bool:
+    """Does a reply name an amount that is none of code's figures now? Task E hand test
+    row 24: after Editar undid a mixed split, «¿Cómo va a pagar la parte de $17.800?»
+    named the old split's cash part, and with no balance word _talks_payment let it
+    go. Allowed: _code_amounts, this turn's code-built lines (a proposal), the newest
+    live order's current() figures and receipts, its open change request's total and
+    the open cart's amounts. With no live payment nothing can be stale (a cart total
+    stays unchecked); a failed read allows nothing."""
+    found = {_amount_of(m) for m in AMOUNT.finditer(str(text))}
+    if not found:
+        return False
+    pay, failed = _live_payment(phone)
+    if failed or pay is None:
+        return failed
+    allowed = _code_amounts(phone) | {pay[key] for key in PAY_FIGURES}
+    for line in _turn.actions.values():
+        allowed |= {_amount_of(m) for m in AMOUNT.finditer(line)}
+    allowed |= {r[key] for r in pay["receipts"] if r["status"] != "DISCARDED"
+                for key in ("amount", "confirmed_amount")}
+    try:
+        request = changes.open_for(pay["order_id"])
+        if request is not None:
+            allowed.add(request["proposed_total"])
+        cart_id = cart.peek_open_cart(phone)
+        if cart_id is not None:
+            view = cart.summary_of(cart_id)
+            allowed |= {view["total"], *(line["line_total"] for line in view["lines"])}
+    except Exception:  # noqa: BLE001 - a failed read only means fewer amounts are allowed
+        traceback.print_exc()
+    return not found <= {amount for amount in allowed if amount}
+
+
 def _wrong_amount(text: str, pay: dict | None, phone: str) -> bool:
     """True when an amount in the reply does not match what its own clause says it is.
     An amount found somewhere in the data is not enough: "le faltan $5.000" must be
@@ -627,11 +761,13 @@ def _wrong_amount(text: str, pay: dict | None, phone: str) -> bool:
 
 def _problems(draft: str, sentence: str, pay: dict, phone: str) -> tuple[bool, bool]:
     """(the sentence is missing, something else in the reply is wrong)."""
-    text, want = _norm(draft), _norm(sentence)
+    # Case is ignored: the model often writes the sentence mid-reply («…y quedan $X…»).
+    text, want = _norm(draft).casefold(), _norm(sentence).casefold()
     missing = want not in text
     rest = text.replace(want, " ")
     # An earlier sentence of this turn that a later change made stale.
-    wrong = any(_norm(s) != want and _norm(s) in rest for s in _turn.sentences)
+    wrong = any(_norm(s).casefold() != want and _norm(s).casefold() in rest
+                for s in _turn.sentences)
     folded = _fold(rest)
     if PAID_CLAIM.search(folded) and pay["outstanding"] > 0:
         wrong = True
@@ -709,14 +845,15 @@ def _finish_turn(phone: str, history: list, draft: str) -> str:
     """The last step of every turn: a reply that speaks about payment is checked
     against the payment as it is now, before anything is sent (C2 Part 2, Gaps 3-5).
 
-    1. Backstop: a customer reply that claims something about the payment with no
-       payment sentence read in this turn is replaced by a fresh answer.
+    1. Backstop: a customer reply that claims something about the payment, or names an
+       amount that is none of code's figures now (_stray_amount), with no payment
+       sentence read in this turn is replaced by a fresh answer.
     2. The payment can't be checked: no claim and no payment amount may go out.
     3. Otherwise the current sentence must be in the reply and nothing else may
        contradict it. A missing sentence alone is appended; anything else gets one more
        answer from the model, and then a safe reply built by code."""
     t = _turn
-    talks = _talks_payment(draft)
+    talks = _talks_payment(draft) or (t.customer and _stray_amount(draft, phone))
     if t.customer and talks and not t.sentences and not t.unverifiable and not t.failed:
         pay, failed = _live_payment(phone)
         if failed:
@@ -726,7 +863,7 @@ def _finish_turn(phone: str, history: list, draft: str) -> str:
             _send(history, draft)
         else:
             t.unverifiable = True
-        talks = _talks_payment(draft)
+        talks = _talks_payment(draft) or (t.customer and _stray_amount(draft, phone))
     if not (t.needs_sentence or t.question or t.unverifiable or t.failed
             or (t.customer and talks)):
         return draft
@@ -783,7 +920,8 @@ TOOLS = [
         "description": (
             "Agrega un producto de la carta al pedido. Devuelve el pedido con los totales "
             "calculados. Si el cliente ya tiene un pedido que el local todavía no ha "
-            "aceptado, el cambio se aplica a ESE pedido."
+            "aceptado, el cambio se aplica a ESE pedido; si el local ya lo aceptó, devuelve "
+            "una propuesta que el cliente tiene que confirmar."
         ),
         "input_schema": {
             "type": "object",
@@ -870,6 +1008,22 @@ TOOLS = [
     {
         "name": "confirm_order",
         "description": "El cliente confirmó el pedido. Sólo después de que él dijo que sí.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "confirm_change",
+        "description": (
+            "El cliente dijo que sí a la propuesta de cambio de un pedido que el local ya "
+            "aceptó. Sólo después de que él lo escribió."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "discard_change",
+        "description": (
+            "El cliente dijo que no a la propuesta de cambio, o ya no quiere el cambio que "
+            "pidió y que el local está revisando."
+        ),
         "input_schema": {"type": "object", "properties": {}},
     },
     {
@@ -1003,17 +1157,57 @@ def _amended_text(phone: str, order: dict, change: dict) -> str:
     )
 
 
-def _edit(phone: str, attempt: str, mutate=None, **delivery) -> str:
+def _join(parts: list[str]) -> str:
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " y " + parts[-1]
+
+
+SENT_TO_RESTAURANT = ("Listo, le pasé su cambio al local. Le avisamos cuando lo revisen. Por ahora "
+                      "su pedido sigue igual.")
+
+
+def _propose(phone: str, order: dict, mutate=None, **delivery) -> str:
+    """Window 3 (Task E): a change to an accepted order becomes a proposal with the price
+    and total code computed. The customer confirms it (confirm_change): an AUTO one is
+    applied then, an APPROVAL one goes to the restaurant's card."""
+    try:
+        with db.transaction():
+            result = changes.propose(order, phone, mutate, **delivery)
+    except orders.EmptyEdit:
+        return ("NO SE PUDO: el pedido no puede quedar vacío, así que no se cambió nada. Si el "
+                "cliente ya no quiere el pedido, usa cancel_order.")
+    except orders.ChangeRefused as exc:
+        return f"NO SE PUDO: {exc} Díselo al cliente con amabilidad. No le menciones ningún código."
+    if result["kind"] == "same":
+        _action("change", "Así su pedido queda igual que antes; no hay nada que cambiar.")
+        return ("Con ese cambio el pedido quedaría igual que ahora: no hay ningún cambio pendiente. "
+                "Díselo al cliente. No le menciones ningún código.")
+    total = fmt(result["view"]["total"])
+    if result["kind"] == "AUTO":
+        added = changes.added_lines(order, result["target"])
+        text = (f"Agregar {_join([f'{qty}× {label} ({fmt(price)})' for qty, label, price in added])}."
+                f" Su pedido quedaría en {total}. ¿Lo agregamos?")
+    else:
+        text = (f"Este cambio lo tiene que aprobar el local: {'; '.join(result['row']['diff'])}. "
+                f"Si lo aprueban, su pedido quedaría en {total}. ¿Se lo envío al local?")
+    _action("change", text)
+    _turn.proposal = text
+    return (f"PROPUESTA, todavía no se cambió nada. Copia tal cual, sin cambiar nada, este "
+            f"mensaje: «{text}» Si el cliente pidió cambiar un producto por otro y todavía no "
+            "quitaste el anterior, usa remove_item ahora: la propuesta se actualiza sola. Si el "
+            "cliente dice que sí, usa confirm_change; si dice que no, usa discard_change. No le "
+            "menciones ningún código.")
+
+
+def _edit(phone: str, mutate=None, **delivery) -> str:
     """Every tool that changes what was ordered goes through here."""
     window, order = orders.modification_window(phone)
     if window == 3:
-        return _handoff(order, f"El cliente quiere {attempt}.", "el local ya aceptó este pedido")
+        return _propose(phone, order, mutate, **delivery)
     if window == 2:
         try:
             order, change = orders.amend(order["id"], phone, mutate, **delivery)
         except orders.NotEditable:
-            return _handoff(orders.get(order["id"]), f"El cliente quiere {attempt}.",
-                            "el local acaba de aceptar este pedido")
+            return _propose(phone, orders.get(order["id"]), mutate, **delivery)
         except orders.EmptyEdit:
             return ("NO SE PUDO: el pedido no puede quedar vacío, así que no se cambió nada. "
                     "Pregúntale al cliente si quiere cancelar el pedido; sólo si dice que sí, usa "
@@ -1033,32 +1227,45 @@ def _run_tool(phone: str, name: str, args: dict) -> str:
         return _run_tool_locked(phone, name, args)
 
 
+STICKER_BLOCKED = {"confirm_order", "confirm_change", "cancel_order", "choose_payment"}
+STICKER_REFUSED = ("NO SE PUDO: un sticker no confirma, no cancela ni elige la forma de pago. "
+                   "Pídele al cliente que lo escriba.")
+
+
+def _pending_change_text(order: dict) -> str:
+    """The open request of an order, in words, for show_cart and order_status."""
+    request = changes.open_for(order["id"])
+    if request is None:
+        return ""
+    if request["status"] == "PENDING":
+        return (" Hay un cambio que el local está revisando y todavía no se aplicó: "
+                + "; ".join(request["diff"]) + ".")
+    return (" Hay un cambio propuesto que espera la respuesta del cliente: "
+            + "; ".join(request["diff"]) + ".")
+
+
 def _run_tool_locked(phone: str, name: str, args: dict) -> str:
+    if _turn.sticker and name in STICKER_BLOCKED:
+        return STICKER_REFUSED
     try:
         if name == "add_item":
-            label = (CATALOG.item(args["item_id"]) or {}).get("name", args["item_id"])
             qty = int(args.get("qty", 1))
-            attempt = f"agregar {qty}x {label}"
             mutate = lambda: cart.add_item(
                 phone, args["item_id"], qty, args.get("modifier_ids") or [], args.get("note"),
             )
-            return _edit(phone, attempt, mutate)
+            return _edit(phone, mutate)
 
         if name == "remove_item":
-            label = (CATALOG.item(args["item_id"]) or {}).get("name", args["item_id"])
             qty = args.get("qty")
-            attempt = f"quitar {qty}x {label}" if qty else f"quitar {label}"
             mutate = lambda: cart.remove_item(phone, args["item_id"], qty)
-            return _edit(phone, attempt, mutate)
+            return _edit(phone, mutate)
 
         if name == "set_qty":
-            label = (CATALOG.item(args["item_id"]) or {}).get("name", args["item_id"])
             qty = int(args["qty"])
-            attempt = f"dejar {qty}x {label}"
             selector = "note" in args or "modifier_ids" in args
             line = (args.get("modifier_ids") or [], args.get("note") or "") if selector else None
             mutate = lambda: cart.set_qty(phone, args["item_id"], qty, line)
-            return _edit(phone, attempt, mutate)
+            return _edit(phone, mutate)
 
         if name == "show_cart":
             window, order = orders.modification_window(phone)
@@ -1070,8 +1277,10 @@ def _run_tool_locked(phone: str, name: str, args: dict) -> str:
                 )
             if window == 3:
                 return (
-                    "Pedido actual (el local ya lo aceptó: un cambio pasa a una persona):\n"
-                    + _order_text(order) + " No le menciones ningún código."
+                    "Pedido actual (el local ya lo aceptó: un cambio se propone con las "
+                    "herramientas de siempre y el cliente lo confirma):\n"
+                    + _order_text(order) + _pending_change_text(order)
+                    + " No le menciones ningún código."
                 )
             return cart.render(cart.summary(phone))
 
@@ -1099,14 +1308,8 @@ def _run_tool_locked(phone: str, name: str, args: dict) -> str:
         if name == "create_order":
             window, live = orders.modification_window(phone)
             if window in (2, 3):
-                fulfilment = args["fulfilment"]
-                address = args.get("address")
-                zone = args.get("zone")
-                if fulfilment == "DELIVERY":
-                    attempt = f"cambiar la entrega: domicilio a {address} ({zone})"
-                else:
-                    attempt = "cambiar la entrega: recoger en el local"
-                return _edit(phone, attempt, None, fulfilment=fulfilment, address=address, zone=zone)
+                return _edit(phone, None, fulfilment=args["fulfilment"],
+                             address=args.get("address"), zone=args.get("zone"))
             order = orders.create_from_cart(
                 phone,
                 args["fulfilment"],
@@ -1160,6 +1363,8 @@ def _run_tool_locked(phone: str, name: str, args: dict) -> str:
             )
             orders.apply_event(order["id"], event, args.get("reason"))
             orders.reopen_cart_after_edit(phone)
+            # The bot finished this order itself: its history stays useful (G43).
+            _fresh_after[phone] = order["id"]
             _action("cancel", "Su pedido quedó cancelado.")
             return "Pedido cancelado. No le menciones ningún código."
 
@@ -1177,26 +1382,12 @@ def _run_tool_locked(phone: str, name: str, args: dict) -> str:
                 method != "MIXED" or requested_transfer is None
                 or requested_transfer == payment["transfer_amount"]
             )
-            # Cash a person already collected settles the method like a receipt does.
-            cash_registered = payment["cash_received"] > 0
-            if same and (order["state"] == "OUT_FOR_DELIVERY" or payment["status"] != "PENDING"
-                         or cash_registered):
+            # On the way, a receipt, or cash a person already collected: a person decides.
+            lock = method_lock_reason(order)
+            if same and lock:
                 return "La forma de pago ya estaba registrada así; no cambió nada."
-            if order["state"] == "OUT_FOR_DELIVERY":
-                return _handoff(
-                    order, f"El cliente quiere cambiar la forma de pago a {label}.",
-                    "el pedido ya va en camino y el domiciliario no ve el panel",
-                )
-            if payment["status"] != "PENDING":
-                return _handoff(
-                    order, f"El cliente quiere cambiar la forma de pago a {label}.",
-                    "el cliente ya envió un comprobante de pago",
-                )
-            if cash_registered:
-                return _handoff(
-                    order, f"El cliente quiere cambiar la forma de pago a {label}.",
-                    "el local ya registró efectivo recibido para este pedido",
-                )
+            if lock:
+                return _handoff(order, f"El cliente quiere cambiar la forma de pago a {label}.", lock)
             previous_method = payment["method"]
             record = payments.set_method(
                 order["id"], method, requested_transfer, args.get("cash_amount"),
@@ -1236,6 +1427,8 @@ def _run_tool_locked(phone: str, name: str, args: dict) -> str:
             if live is None:
                 _turn.unverifiable = True       # a delivered or cancelled order: not checked here
                 return f"{head} {UNVERIFIED_TOOL}"
+            # What it has now (Task E: staff or an accepted request may have changed it).
+            head += "\n" + _order_text(live) + _pending_change_text(live)
             try:
                 sentence = _hand_out_sentence(phone, live["payment"], required=False)
             except Exception:  # noqa: BLE001 - never an old amount instead
@@ -1246,6 +1439,47 @@ def _run_tool_locked(phone: str, name: str, args: dict) -> str:
                 f"{head} Frase de pago, cópiala tal cual, sin cambiar nada, cuando hables del "
                 f"pago: «{sentence}» No le menciones ningún código."
             )
+
+        if name == "confirm_change":
+            order = orders.latest_for(phone, list(orders.LOCKED))
+            row = changes.open_for(order["id"]) if order else None
+            if row is None or row["status"] != "PROPOSED":
+                return ("NO SE PUDO: no hay ningún cambio esperando la respuesta del cliente. Si "
+                        "quiere cambiar algo, usa add_item, remove_item, set_qty o create_order.")
+            _turn.proposal = None
+            if row["route"] == "APPROVAL":
+                changes.send_to_restaurant(row)
+                _action("change", SENT_TO_RESTAURANT)
+                return (f"SOLICITUD ENVIADA AL LOCAL, todavía no se cambió nada. Dile tal cual: "
+                        f"«{SENT_TO_RESTAURANT}» No le menciones ningún código.")
+            if changes.auto_is_stale(order, row):
+                changes.discard(row, "system", "el pedido cambió antes de la confirmación")
+                return ("NO SE PUDO: el pedido cambió mientras tanto, así que no se agregó nada. "
+                        "Usa show_cart, muéstrale cómo está ahora y pregúntale otra vez qué quiere "
+                        "cambiar. No le menciones ningún código.")
+            added = [f"{qty}× {label}" for qty, label, _ in changes.added_lines(order, row["target"])]
+            # The order, the request and the customer's notice land together; the worker
+            # sends the notice after this turn, before the reply (Task E §3.8).
+            with db.transaction():
+                applied, change = changes.apply_auto(order, row)
+                wa.queue(phone, order_message(applied, f"Listo, agregamos {_join(added)}. Así quedó "
+                                              "su pedido:", change), applied["id"], "ORDER_STATE")
+            _action("change", "¡Listo! Ya quedó.")
+            return ("CAMBIO HECHO: ya se agregó. El sistema le envía al cliente un mensaje con el "
+                    "pedido como quedó y lo que falta por pagar. Respóndele sólo una frase corta "
+                    "(por ejemplo «¡Listo! Ya quedó.»), sin montos, sin la lista y sin hablar del "
+                    "pago. No le menciones ningún código.")
+
+        if name == "discard_change":
+            order = orders.latest_for(phone, list(orders.LOCKED))
+            row = changes.open_for(order["id"]) if order else None
+            if row is None:
+                return "No hay ningún cambio pendiente: el pedido sigue igual."
+            changes.discard(row, "customer")
+            _turn.proposal = None
+            _action("change", "Listo, no cambiamos nada.")
+            return ("Cambio descartado: el pedido sigue igual. Dile tal cual: «Listo, no cambiamos "
+                    "nada.» No le menciones ningún código.")
 
         if name == "request_handoff":
             topic = args.get("topic")
@@ -1304,6 +1538,8 @@ def _run_tool_locked(phone: str, name: str, args: dict) -> str:
         return f"NO SE PUDO: {exc}"
     except orders.IllegalTransition as exc:
         return f"NO SE PUDO: {exc}"
+    except (wa.TooLong, changes.Conflict) as exc:
+        return f"NO SE PUDO: {exc}"
     except KeyError as exc:
         return (
             f"NO SE PUDO: {exc} no existe en la carta. No lo inventes: dile al cliente "
@@ -1315,24 +1551,46 @@ def _run_tool_locked(phone: str, name: str, args: dict) -> str:
 
 # ---- the conversation loop ------------------------------------------
 
+def _start_fresh(phone: str, history: list) -> None:
+    """G43 (Task E): on the first turn after the phone's latest order finished, with no
+    live order and nothing in an open cart, the old conversation is dropped once, so
+    a finished order can never leak into a new cart. ESTADO REAL still says how the
+    last order ended. The bot's own cancel_order marks its order (the history stays),
+    and a REJECTED or staff-cancelled order is dropped right before _stop_message,
+    which then stays for the customer's reply."""
+    latest = db.q1("SELECT id, state FROM orders WHERE phone=%s ORDER BY id DESC LIMIT 1", (phone,))
+    if latest is None or latest["state"] not in orders.TERMINAL or _fresh_after.get(phone) == latest["id"]:
+        return
+    if orders.live_states(phone) or cart.has_items(phone):
+        return
+    _fresh_after[phone] = latest["id"]
+    if history:
+        history.clear()
+        _print(f"[bot ...{phone[-4:]}] conversación nueva: el pedido anterior terminó")
+
+
 def reply(phone: str, user_content, *, customer: bool = False, with_payment: bool = False,
-          action: str | None = None) -> str:
+          action: str | None = None, sticker: bool = False, said: str | None = None) -> str:
     """user_content is a string, or a content-block list (for images).
 
     customer: it is the customer's own text (main.handle); a payment question starts
     with a forced order_status, and a reply that speaks about payment is checked.
+    said: user_content without the notes about messages the customer quoted; the
+    payment question is read there, never in quoted text (None: user_content).
     with_payment: a system instruction that carries the payment sentence (a clean
     receipt); the reply must carry it too. action: what that instruction reports as
-    done, kept by the safe reply (_finish_turn)."""
+    done, kept by the safe reply (_finish_turn). sticker: the turn answers a sticker,
+    which never confirms, cancels or chooses a payment (STICKER_BLOCKED)."""
     global _turn
     with _lock:
         history = _history.setdefault(phone, [])
+        _start_fresh(phone, history)
         # If the call below fails, the history must go back exactly as it was.
         # A half-written turn leaves two user messages in a row, and every later
         # request then fails with "roles must alternate" — one bad key turns
         # into a conversation that never recovers.
         checkpoint = list(history)
-        _turn = _Turn(customer=customer, with_payment=with_payment)
+        _turn = _Turn(customer=customer, with_payment=with_payment, sticker=sticker)
         if action:
             _action("instruction", action)
         if not customer and isinstance(user_content, str):
@@ -1342,7 +1600,7 @@ def reply(phone: str, user_content, *, customer: bool = False, with_payment: boo
                 sentence = payment_sentence_for(phone)
                 if sentence:
                     _turn.sentences.append(sentence)
-            return _reply_locked(phone, history, user_content)
+            return _reply_locked(phone, history, user_content, said)
         except Exception:
             history[:] = checkpoint
             raise
@@ -1378,7 +1636,10 @@ def _log_tool(phone: str, name: str, args: dict, output: str) -> None:
     result = " ".join(str(output).split())
     if len(result) > TOOL_LOG_CHARS:
         result = result[:TOOL_LOG_CHARS] + "..."
-    line = f"[bot ...{phone[-4:]}] {name} {json.dumps(args, ensure_ascii=False)} -> {result}"
+    _print(f"[bot ...{phone[-4:]}] {name} {json.dumps(args, ensure_ascii=False)} -> {result}")
+
+
+def _print(line: str) -> None:
     try:
         print(line, flush=True)
     except UnicodeEncodeError:
@@ -1409,12 +1670,12 @@ def _payment_question(phone: str, text: str) -> dict | None:
     return None
 
 
-def _reply_locked(phone: str, history: list, user_content) -> str:
+def _reply_locked(phone: str, history: list, user_content, said: str | None = None) -> str:
     history.append({"role": "user", "content": user_content})
     _trim(history)
     force = None
     if _turn.customer and isinstance(user_content, str):
-        force = _payment_question(phone, user_content)
+        force = _payment_question(phone, user_content if said is None else said)
 
     text_out = []
     for round_number in range(MAX_TOOL_ROUNDS):  # tool-use rounds
@@ -1468,6 +1729,10 @@ def _reply_locked(phone: str, history: list, user_content) -> str:
         text_out = [b.text.strip() for b in response.content if b.type == "text" and b.text.strip()]
 
     text = "\n\n".join(text_out).strip() or "Perdón, ¿me lo repite?"
+    if _turn.proposal:
+        # The customer's «sí» runs the route code chose (AUTO or APPROVAL), so the
+        # question goes out exactly as code built it, never the model's rewording.
+        text = _send(history, _turn.proposal)
     text = _finish_turn(phone, history, text)
     _trim(history)
     return text
@@ -1485,10 +1750,12 @@ def correct_last_reply(phone: str, text: str) -> None:
 
 def forget(phone: str) -> None:
     _history.pop(phone, None)
+    _fresh_after.pop(phone, None)
 
 
 def reset_all() -> None:
     _history.clear()
+    _fresh_after.clear()
 
 
 # ---- payment proof: OCR only, no verdict ----------------------------
@@ -1507,6 +1774,10 @@ Devuelve SOLO un objeto JSON, sin texto alrededor, con estas llaves:
   date_iso            la misma fecha y hora en ISO 8601 con desfase horario
                        (ej: 2026-09-22T19:29:00-05:00); null si no aparece
   provider            Nequi, Daviplata, Bancolombia...
+  is_receipt          true si la imagen es un comprobante o constancia de un pago o una
+                       transferencia; false si claramente no lo es (comida, una carta o
+                       menú, una dirección, una persona, un chat, un sticker); null si no
+                       estás seguro
 
 destination_* es quien RECIBE la plata; origin_* es quien la ENVÍA. En un
 comprobante de Nequi, "Enviaste a <nombre>" nombra al que RECIBE (destination_*),
@@ -1528,17 +1799,111 @@ def extract_proof(image_block: dict) -> dict:
         }],
     )
     text = "".join(b.text for b in response.content if b.type == "text").strip()
+    found = _json_object(text)
+    # Always a dict: a list, null or a bare value would break every reader (Task E).
+    if found is not None:
+        return found
+    return {"amount": None, "destination_account": None, "reference": None,
+            "_raw": text[:400]}
+
+
+def _json_object(text: str) -> dict | None:
+    """The JSON object a reader answered, also inside ``` fences or surrounding text."""
     if text.startswith("```"):
         text = text.strip("`")
         text = text.split("\n", 1)[1] if "\n" in text else text
     try:
-        return json.loads(text)
+        found = json.loads(text)
     except ValueError:
+        found = None
         start, end = text.find("{"), text.rfind("}")
         if start >= 0 and end > start:
             try:
-                return json.loads(text[start:end + 1])
+                found = json.loads(text[start:end + 1])
             except ValueError:
                 pass
-    return {"amount": None, "destination_account": None, "reference": None,
-            "_raw": text[:400]}
+    return found if isinstance(found, dict) else None
+
+
+# ---- sticker intent (Task E addendum): the model reads, code decides ------------
+
+STICKER_SYSTEM = """Eres un lector de stickers de WhatsApp. Un cliente le envió este sticker a
+un restaurante justo después de que el restaurante le hizo una pregunta de sí o no.
+
+Devuelve SOLO un objeto JSON, sin texto alrededor, con estas llaves:
+  meaning  "AFFIRM" si el sticker claramente responde que sí o está de acuerdo (un pulgar
+           arriba, "ok", "sí", "dale", "listo"); "DENY" si claramente responde que no;
+           "THANKS" si agradece o saluda; "OTHER" si expresa otra cosa; "UNCLEAR" si no
+           estás seguro
+  text     las palabras que se leen en el sticker, o null
+
+No adivines: si el sticker podría significar varias cosas, usa "UNCLEAR"."""
+
+QUESTIONS = {
+    "ORDER": "¿Me confirma el pedido así?",
+    "AUTO": "¿Lo agregamos?",
+    "APPROVAL": "¿Se lo envío al local?",
+}
+MEANINGS_ALLOWED = {"AFFIRM", "DENY", "THANKS", "OTHER", "UNCLEAR"}
+
+
+def pending_question(phone: str, before: str) -> dict | None:
+    """The one yes/no question code knows is waiting for this customer: the newest
+    order's summary (PENDING_CONFIRMATION), or a PROPOSED change. Both or neither: None.
+    It counts only once shown: a message to the customer went out after it was asked and
+    before `before` (the sticker's arrival)."""
+    newest = orders.latest_for(phone)
+    order = newest if newest and newest["state"] == "PENDING_CONFIRMATION" else None
+    accepted = orders.latest_for(phone, list(orders.LOCKED))
+    request = changes.open_for(accepted["id"]) if accepted else None
+    proposal = request if request and request["status"] == "PROPOSED" else None
+    if (order is None) == (proposal is None):
+        return None
+    asked_at = order["updated_at"] if order else proposal["updated_at"]
+    shown = db.q1(
+        "SELECT 1 FROM outbound_messages WHERE phone=%s AND status IN ('SENT','FAKE')"
+        " AND sent_at > %s AND sent_at < %s LIMIT 1",
+        (phone, asked_at, before),
+    )
+    if shown is None:
+        return None
+    if order:
+        return {"kind": "ORDER", "question": QUESTIONS["ORDER"], "order": order}
+    return {"kind": "CHANGE", "question": QUESTIONS[proposal["route"]], "request": proposal}
+
+
+def read_sticker(image_block: dict, question: dict) -> str:
+    """What the sticker says, as one of MEANINGS_ALLOWED. A signal only: an odd answer is
+    UNCLEAR, and code decides what, if anything, it may do."""
+    response = client().messages.create(
+        model=model(),
+        max_tokens=256,
+        system=STICKER_SYSTEM,
+        messages=[{"role": "user", "content": [
+            image_block, {"type": "text", "text": f"La pregunta era: «{question['question']}»"},
+        ]}],
+    )
+    text = "".join(b.text for b in response.content if b.type == "text").strip()
+    meaning = str((_json_object(text) or {}).get("meaning") or "").upper()
+    return meaning if meaning in MEANINGS_ALLOWED else "UNCLEAR"
+
+
+def run_for_sticker(phone: str, tool: str) -> str:
+    """Runs the one tool a sticker's answer allows (main.STICKER_TOOLS), under the turn
+    lock, outside a sticker turn so the guard does not stop it, with the tool's own checks
+    (still PENDING_CONFIRMATION, auto_is_stale, the request's revision)."""
+    global _turn
+    with _lock:
+        _turn = _Turn()
+        try:
+            output = _run_tool(phone, tool, {})
+            _log_tool(phone, tool, {"por": "sticker"}, output)
+            return output
+        finally:
+            _turn = _Turn()
+
+
+def is_receipt(extracted: dict) -> bool:
+    """Only a clear «no» from the reader keeps a photo out of the receipt checks (Task
+    E). Unsure or unreadable is a receipt, so a person sees it."""
+    return extracted.get("is_receipt") is not False

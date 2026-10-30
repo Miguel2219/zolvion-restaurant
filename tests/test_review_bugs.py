@@ -284,11 +284,12 @@ R5_CASES = {
             "latitude": 7.1193, "longitude": -73.1227, "name": "Edificio Torre 48",
             "address": "Calle 48 #34-20, Cabecera",
         }},
-        ["Edificio Torre 48", "Calle 48 #34-20, Cabecera", "7.1193", "-73.1227", "barrio"],
+        # Task E: no coordinates reach the model; code keeps the pin for the map.
+        ["Edificio Torre 48", "Calle 48 #34-20, Cabecera", "barrio"],
     ),
     "location_without_address": (
         {"type": "location", "location": {"latitude": 7.1193, "longitude": -73.1227}},
-        ["dirección escrita", "7.1193"],
+        ["barrio", "referencia"],
     ),
     "image_failed": (
         {"type": "image", "image": {"id": "m1", "caption": "mi comprobante"}},
