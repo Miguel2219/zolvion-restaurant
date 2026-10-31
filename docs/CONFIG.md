@@ -21,11 +21,12 @@ Path: `RESTAURANT_CONFIG` env var, default `config/restaurant.json`.
 | `fulfilment.pickup`, `fulfilment.delivery` | On/off flags | Not read by code |
 | `fulfilment.default_delivery_fee` | Fee for a zone not in the list | Yes |
 | `fulfilment.delivery_zones[]` | `{name, fee}`; matched folded (no accents/case), exact first, then partial | Yes (fee + prompt) |
+| `fulfilment.prep_minutes` | The buttons on Aceptar / Cambiar tiempo (the whole order, delivery included); none preselected | Yes |
 | `payments.methods` | Allowed of `CASH`, `TRANSFER`, `MIXED`; checked by `set_method` | Yes |
 | `payments.proof_clock_skew_minutes` | Receipt date tolerance (default 2) | Yes |
 | `payments.proof_notice_minutes` | Receipt age that earns a grey note (default 5) | Yes |
 | `payments.accounts[]` | `{provider, number, holder}`: shown to customers, used to verify receipt destinations | Yes |
-| `menu.categories[].items[]` | `{id, name, price, available, description}` | Yes |
+| `menu.categories[].items[]` | `{id, name, price, available, description}`; optional `add_after_accept: true` (Task E): the customer can add it on their own after the restaurant accepted the order (a drink, nothing to prepare). Off unless set | Yes |
 | `menu.modifiers[]` | `{id, name, price, applies_to: [category ids]}`; price 0 for removals | Yes |
 
 Prices are integers in pesos. The prompt lists each item as

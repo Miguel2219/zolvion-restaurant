@@ -47,6 +47,52 @@ def related_order_of(cart_id: int) -> int | None:
     return row["related_order_id"] if row else None
 
 
+def has_items(phone: str) -> bool:
+    """Does the customer have an OPEN cart with something in it? Never creates one."""
+    cart_id = peek_open_cart(phone)
+    return cart_id is not None and db.q1(
+        "SELECT 1 FROM cart_items WHERE cart_id=%s LIMIT 1", (cart_id,)
+    ) is not None
+
+
+def staging_cart(phone: str, state: str) -> int:
+    """A cart that only stages a change to an order (Task E: a staff edit or a customer's
+    proposal). Its state is never OPEN, so the customer's own cart is never read or
+    touched by it, and window 1 never sees it."""
+    return db.insert(
+        "INSERT INTO carts(phone, state, created_at, updated_at) VALUES(%s,%s,%s,%s) RETURNING id",
+        (phone, state, db.now(), db.now()),
+    )
+
+
+def order_lines(order: dict) -> list[dict]:
+    """An order's lines as item ids and modifier ids, for staging a change. Stored lines
+    keep modifier names in order; a name no longer on the menu is dropped, as
+    fill_from_order does."""
+    by_name = {m["name"]: m["id"] for m in CATALOG.raw["menu"].get("modifiers", [])}
+    return [{
+        "item_id": item["item_id"], "qty": item["qty"],
+        "modifier_ids": [by_name[n] for n in (item.get("modifiers") or []) if n in by_name],
+        "note": item.get("note") or None,
+    } for item in order["items"]]
+
+
+def cart_lines(cart_id: int) -> list[dict]:
+    """A cart's lines as item ids and modifier ids (the shape fill_lines takes)."""
+    return [{
+        "item_id": row["item_id"], "qty": row["qty"],
+        "modifier_ids": db.jloads(row["modifiers"], []), "note": row["note"] or None,
+    } for row in db.q("SELECT * FROM cart_items WHERE cart_id=%s ORDER BY id", (cart_id,))]
+
+
+def fill_lines(cart_id: int, lines: list[dict]) -> None:
+    """Puts lines (item_id, qty, modifier_ids, note) into a staging cart through the
+    same checks and merge as add_item, without its availability check."""
+    for line in lines:
+        _add_line(cart_id, line["item_id"], line["qty"], line.get("modifier_ids") or [],
+                  line.get("note"))
+
+
 def fill_from_order(phone: str, order: dict) -> int:
     """Window 2: the order is being edited, so its items go back into a fresh
     cart. Without this the customer would have to repeat the whole order."""
@@ -112,13 +158,24 @@ class LineChoiceNeeded(Exception):
 
 
 def add_item(phone: str, item_id: str, qty: int = 1, modifier_ids=None, note=None) -> dict:
-    modifier_ids = list(modifier_ids or [])
     item = CATALOG.item(item_id)
     if item is None:
         raise CartError(f"'{item_id}' no está en la carta.")
     if not CATALOG.is_available(item_id):
         raise CartError(f"{item['name']} está agotado hoy.")
-    if not isinstance(qty, int) or qty < 1 or qty > 50:
+    _add_line(open_cart(phone), item_id, qty, modifier_ids, note)
+    return summary(phone)
+
+
+def _add_line(cart_id: int, item_id: str, qty: int, modifier_ids=None, note=None) -> None:
+    """One line into a cart: the checks every line passes (the item exists, a sane
+    quantity, modifiers that exist and apply to it) and the merge of identical lines.
+    Availability is add_item's: staff may add an item marked sold out."""
+    modifier_ids = list(modifier_ids or [])
+    item = CATALOG.item(item_id)
+    if item is None:
+        raise CartError(f"'{item_id}' no está en la carta.")
+    if not isinstance(qty, int) or isinstance(qty, bool) or qty < 1 or qty > 50:
         raise CartError("La cantidad debe estar entre 1 y 50.")
     for modifier_id in modifier_ids:
         modifier = CATALOG.modifier(modifier_id)
@@ -127,7 +184,6 @@ def add_item(phone: str, item_id: str, qty: int = 1, modifier_ids=None, note=Non
         if not CATALOG.modifier_allowed(modifier_id, item_id):
             raise CartError(f"{modifier['name']} no aplica para {item['name']}.")
 
-    cart_id = open_cart(phone)
     rows = db.q(
         "SELECT * FROM cart_items WHERE cart_id=%s AND item_id=%s ORDER BY id",
         (cart_id, item_id),
@@ -143,7 +199,7 @@ def add_item(phone: str, item_id: str, qty: int = 1, modifier_ids=None, note=Non
             (new_qty, _line_total(item_id, new_qty, modifier_ids), match["id"]),
         )
         _touch(cart_id)
-        return summary(phone)
+        return
 
     unit_price = CATALOG.price_of(item_id) + sum(
         CATALOG.modifier_price(m) for m in modifier_ids
@@ -157,7 +213,6 @@ def add_item(phone: str, item_id: str, qty: int = 1, modifier_ids=None, note=Non
         ),
     )
     _touch(cart_id)
-    return summary(phone)
 
 
 def remove_item(phone: str, item_id: str, qty: int | None = None) -> dict:
@@ -235,8 +290,12 @@ def clear(phone: str) -> dict:
 
 
 def summary(phone: str, zone: str | None = None, fulfilment: str = "PICKUP") -> dict:
+    """The customer's open cart, through summary_of."""
+    return summary_of(open_cart(phone), zone, fulfilment)
+
+
+def summary_of(cart_id: int, zone: str | None = None, fulfilment: str = "PICKUP") -> dict:
     """The one function that produces a total. Code only."""
-    cart_id = open_cart(phone)
     rows = db.q("SELECT * FROM cart_items WHERE cart_id=%s ORDER BY id", (cart_id,))
     lines = []
     for row in rows:

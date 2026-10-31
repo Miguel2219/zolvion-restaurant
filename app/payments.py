@@ -150,15 +150,32 @@ def _check_date(extracted: dict, received_at: str, created_at: str) -> tuple[lis
 def _holder_matches(holder: str) -> bool:
     """A proof that shows only the receiver's name still identifies the account.
     Compared on folded text, and only on a strong overlap of name words — so
-    'CASERITAS BURGER' matches 'Caseritas Burger SAS', and a stranger does not."""
+    'CASERITAS BURGER' matches 'Caseritas Burger SAS', and a stranger does not.
+
+    Banks hide or cut the name ('MIG***** PAB*****', 'MIGUEL PAB...'): a word
+    counts by its visible start, which must begin a different word of ours."""
     if not holder:
         return False
-    target = set(_fold(holder).split())
+    target = []
+    for word in _fold(holder).split():
+        visible = word.split("…")[0].rstrip(".")
+        visible = visible[:min((visible.find(ch) for ch in "*•#" if ch in visible),
+                               default=len(visible))]   # not 'x': names have it
+        if visible:
+            target.append(visible)
     if not target:
         return False
     for account in CATALOG.accounts():
-        mine = set(_fold(str(account.get("holder", ""))).split())
-        if mine and len(mine & target) >= min(2, len(mine)):
+        mine = _fold(str(account.get("holder", ""))).split()
+        unused = list(mine)
+        hits = 0
+        for word in target:
+            match = next((m for m in unused if m == word), None) \
+                or next((m for m in unused if m.startswith(word)), None)
+            if match is not None:
+                unused.remove(match)
+                hits += 1
+        if mine and hits >= min(2, len(mine)):
             return True
     return False
 
@@ -196,6 +213,48 @@ def _ocr_amount(extracted: dict | None) -> int | None:
         return read_ocr_amount((extracted or {}).get("amount"))
     except MoneyError:
         return None
+
+
+def _receipt_minute(extracted: dict | None):
+    """The receipt's own date and time, to the minute; None when unreadable."""
+    try:
+        when = datetime.fromisoformat(str((extracted or {}).get("date_iso")))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=CATALOG.timezone())
+    return when.replace(second=0, microsecond=0)
+
+
+def _same_field(a, b) -> bool:
+    """Equal once folded, without spaces or masks (two readings of one screenshot
+    count its asterisks differently); a field one reading lacks says nothing."""
+    a, b = ("".join(ch for ch in _fold(str(v or "")) if ch not in " *•#.…") for v in (a, b))
+    return not a or not b or a == b
+
+
+def _earlier_copy(extracted: dict, received_at: str) -> dict | None:
+    """An earlier receipt row this one repeats, for a receipt with no reference.
+
+    Many banks print none (Nequi's «Enviaste tu dinero»), so the reference index
+    cannot catch a screenshot sent twice. The same readable amount at the same
+    minute, with no shown field that disagrees, is the same receipt."""
+    amount, when = _ocr_amount(extracted), _receipt_minute(extracted)
+    if amount is None or when is None:
+        return None
+    since = (when - timedelta(days=1)).astimezone(timezone.utc).isoformat()
+    rows = db.q(
+        "SELECT id, order_id, status, discard_reason, extracted FROM payment_receipts"
+        " WHERE received_at >= %s AND received_at <= %s ORDER BY id", (since, received_at)
+    )
+    for row in rows:
+        old = db.jloads(row["extracted"], None) or {}
+        if (_ocr_amount(old) == amount and _receipt_minute(old) == when
+                and all(_same_field(extracted.get(key), old.get(key)) for key in (
+                    "provider", "destination_account", "destination_holder",
+                    "origin_account", "origin_holder"))):
+            return row
+    return None
 
 
 def receipts(order_id: int) -> list[dict]:
@@ -349,14 +408,19 @@ def check_proof(
     flags.extend(date_flags)
 
     # 3. destination belongs to the restaurant. The holder name is a fallback
-    #    for when Nequi shows only "Enviaste a <nombre>" and no account number -
+    #    for when Nequi shows only "Enviaste a <nombre>" and no account number,
+    #    or backs up a number masked too far to prove anything (*****7389) -
     #    it never rescues an account number that is actually shown and wrong.
+    #    A destination without digits ("Nequi") is no number at all.
     destination = extracted.get("destination_account")
+    if not any(ch.isdigit() for ch in str(destination or "")):
+        destination = None
     holder = (extracted.get("destination_holder") or "").strip()
     if not destination and not holder:
         flags.append("El comprobante no muestra a quién se le transfirió.")
     elif destination:
-        if not CATALOG.owns_account(destination):
+        if not (CATALOG.owns_account(destination)
+                or (CATALOG.may_own_account(destination) and _holder_matches(holder))):
             flags.append(f"La cuenta de destino ({destination}) no es del restaurante.")
     elif not _holder_matches(holder):
         flags.append(f"La cuenta de destino ({holder}) no es del restaurante.")
@@ -368,6 +432,18 @@ def check_proof(
     # 4. reference not seen before - enforced by the database, not by this code.
     #    The method is inferred only from a clean receipt.
     reference = (extracted.get("reference") or "").strip() or None
+    # 5. no reference shown: the receipt's own amount and minute stand in for it.
+    #    The same copy on this order is a resend like D3's; on another order, red.
+    copy = _earlier_copy(extracted, received_at) if reference is None else None
+    if copy is not None and copy["order_id"] == order_id:
+        reason = copy["discard_reason"] if copy["status"] == "DISCARDED" else None
+        return {**current(order_id), "receipt": None, "resent": True,
+                "resent_discard_reason": reason, "inferred": False}
+    if copy is not None:
+        flags.append(
+            "Este comprobante parece el mismo que ya llegó para otro pedido "
+            "(mismo monto, fecha y hora, sin referencia)."
+        )
     status = "FLAGGED" if flags else "PROOF_RECEIVED"
     if status != "PROOF_RECEIVED":
         inferred = None

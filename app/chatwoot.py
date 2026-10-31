@@ -166,8 +166,8 @@ def conversation_state(payload: dict) -> dict:
 
 def parse_customer(payload: dict) -> dict:
     """A customer message, in the fields inbound_messages keeps. A sticker arrives as an
-    ordinary image/webp with nothing marking it (step 0), so any webp image is a sticker
-    and never a receipt."""
+    ordinary image/webp with nothing marking it (step 0), so any webp image is a sticker.
+    Its image is kept (Task E): the bot sees it, and a webp receipt is still checked."""
     attachment = (payload.get("attachments") or [{}])[0]
     file_type = attachment.get("file_type")
     text = payload.get("content")
@@ -176,7 +176,7 @@ def parse_customer(payload: dict) -> dict:
         webp = (attachment.get("content_type") == "image/webp"
                 or attachment.get("extension") == "webp")
         kind = "sticker" if webp else "image"
-        media_url = None if webp else attachment.get("data_url")
+        media_url = attachment.get("data_url")
     elif file_type == "location":
         kind = "location"
         location = {
@@ -186,8 +186,18 @@ def parse_customer(payload: dict) -> dict:
         }
     elif file_type:
         kind = FILE_KINDS.get(file_type, "unsupported")
+        if kind == "audio":
+            media_url = attachment.get("data_url")   # Task E addendum: the bot listens
     state = conversation_state(payload)
     source = payload.get("source_id")
+    # A reply that quotes an earlier message (recorded 22 Oct): Chatwoot copies Meta's
+    # context.id into in_reply_to_external_id, and in_reply_to is its own id for that
+    # message when it has it in this conversation.
+    quoted = payload.get("content_attributes") or {}
+    reply_to = None
+    if quoted.get("in_reply_to_external_id") or quoted.get("in_reply_to"):
+        reply_to = {"id": quoted.get("in_reply_to_external_id"),
+                    "chatwoot_id": quoted.get("in_reply_to")}
     return {
         **state,
         "wa_message_id": source or f"chatwoot-{payload.get('id')}",
@@ -196,6 +206,7 @@ def parse_customer(payload: dict) -> dict:
         "text": text,
         "media_url": media_url,
         "location": location,
+        "reply_to": reply_to,
     }
 
 
@@ -314,6 +325,6 @@ def download(url: str) -> tuple[bytes, str] | None:
     except httpx.HTTPError:
         return None
     mime = response.headers.get("content-type", "").split(";")[0].strip()
-    if response.status_code >= 300 or not mime.startswith("image/"):
-        return None                   # e.g. ngrok's HTML warning page instead of the image
+    if response.status_code >= 300 or not mime.startswith(("image/", "audio/", "application/ogg")):
+        return None                   # e.g. ngrok's HTML warning page instead of the file
     return response.content, mime

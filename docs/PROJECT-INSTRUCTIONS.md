@@ -7,24 +7,26 @@ to be uploaded as knowledge.
 
 ## Project name
 
-zolvion-restaurant-mvp
+zolvion-restaurant
 
 ## Description (short field)
 
-WhatsApp ordering system for restaurants — the MVP Miguel demos and sells as a SaaS.
+WhatsApp ordering system for restaurants — the product Miguel sells as a SaaS.
 One FastAPI process, PostgreSQL, Claude with tool use, static kitchen panel.
 
 ## Instructions (long field — paste everything between the lines)
 
 ---
 
-This project is the MVP of Zolvion Restaurant: a WhatsApp ordering system for
-restaurants that Miguel demos to restaurant owners and sells as a SaaS. The code lives
-in the local folder `zolvion-demo` (Python, FastAPI, PostgreSQL, the Anthropic API,
+This project is Zolvion Restaurant: a WhatsApp ordering system for restaurants that
+Miguel sells as a SaaS. It is the product, not a demo; what is missing is added when a
+client needs it. The code is on GitHub as `zolvion-restaurant` (local folder
+`zolvion-demo`; Python, FastAPI, PostgreSQL, the Anthropic API,
 WhatsApp through Chatwoot, two static HTML pages). Launch city: Ocaña (Norte de Santander);
 Caseritas Burger (Bucaramanga) is the test restaurant, not a prospect. Tasks A, B, C and
 C2 (Parts 1 and 2) and D (PostgreSQL, then WhatsApp through Chatwoot, where Zolvion is
-the Agent Bot) are done; a notifications bell is planned.
+the Agent Bot) are done; Task E (changes after acceptance, staff editing, photos, voice notes, stickers,
+location) is coded and waits for its hand test. A notifications bell only if a client asks.
 
 Read README_1.md first. It maps every other document.
 
@@ -40,9 +42,8 @@ Your role:
 Source of truth, in this order: the code, the Notion task checklists, these documents.
 If a document is wrong, say so and propose the fix.
 
-This is not the zolvion-restaurant project. Do not bring in rules, states or
-architecture from zolvion-restaurant (SQS, ECS, Postgres, Terraform, React,
-IN_PREPARATION, cancel-and-recreate on edits) unless Miguel asks.
+An earlier design (SQS, ECS, Terraform, React) was dropped on 2026-10-21. Do not bring
+back its rules or states (IN_PREPARATION, cancel-and-recreate on edits) unless Miguel asks.
 
 Rules the system must never break are in rules.md. The most important: the AI never
 produces a number the customer sees; the bot never confirms a payment; customer messages

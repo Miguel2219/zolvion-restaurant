@@ -95,6 +95,37 @@
   .modal button{border:0;border-radius:9px;padding:9px 15px;font-size:13.5px;font-weight:600;
        cursor:pointer;background:var(--accent);color:#11161d}
   .modal button.ghost{background:#252c36;color:var(--ink)}
+  .mins{display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:8px}
+  .mins button{padding:14px 0;font-size:16px}
+  /* Task E: requests, automatic additions, the editor, notices */
+  .chg{background:#13202e;border:1px solid rgba(88,166,255,.45);border-radius:9px;
+       padding:9px;margin-bottom:9px;font-size:12.5px;color:#cfe3ff}
+  .chg b{display:block;margin-bottom:3px}
+  .added{background:#132418;border:1px solid rgba(46,160,67,.45);border-radius:9px;
+       padding:9px;margin-bottom:9px;font-size:12.5px;color:#bfe8c8}
+  .tag.notice{color:var(--bad);border-color:rgba(240,80,58,.55);cursor:pointer;background:transparent}
+  header button.alarm{color:#ffb3a7;border-color:rgba(240,80,58,.55)}
+  .modal.wide{width:min(620px,100%);max-height:calc(100vh - 32px);overflow:auto}
+  .modal select,.modal .einput{background:#0d1117;color:var(--ink);border:1px solid var(--line);
+       border-radius:9px;padding:8px;font:inherit;font-size:13.5px;max-width:100%}
+  .modal .einput{width:100%}
+  .eline{border-top:1px solid var(--line);padding:9px 0}
+  .erow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .erow .ename{flex:1;min-width:120px;font-weight:600}
+  .modal button.mini{padding:4px 10px;font-size:13px;background:#252c36;color:var(--ink)}
+  .chips{display:flex;gap:5px;flex-wrap:wrap;margin:6px 0}
+  .chip{font-size:12px;border:1px solid var(--line);border-radius:20px;padding:2px 4px 2px 9px}
+  .chip.bad{color:var(--bad);border-color:rgba(240,80,58,.55)}
+  .chip button{background:transparent!important;color:var(--muted)!important;padding:0 5px!important}
+  .esec{margin-top:12px}
+  .esec label{margin-right:12px;font-size:13.5px}
+  .check{display:flex;gap:8px;align-items:flex-start;margin-top:10px;font-size:13.5px}
+  .warnbox{color:#f0d38a;font-size:12.5px;margin-top:8px}
+  pre.msg{white-space:pre-wrap;background:#0d1117;border:1px solid var(--line);border-radius:9px;
+       padding:10px;font:inherit;font-size:13.5px;margin:0}
+  .nrow{border-top:1px solid var(--line);padding:8px 0;display:flex;gap:8px;align-items:center;
+       flex-wrap:wrap;font-size:13px}
+  .nrow span{flex:1;min-width:160px}
   #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:60;
          background:#252c36;border:1px solid var(--line);color:var(--ink);padding:10px 16px;
          border-radius:11px;font-size:13.5px;box-shadow:0 6px 24px rgba(0,0,0,.45);display:none}
@@ -106,6 +137,7 @@
   <h1 id="title">Panel de pedidos</h1>
   <span class="channel" id="channel"></span>
   <span class="spacer"></span>
+  <button id="notices" class="alarm" hidden onclick="showNotices()"></button>
   <a href="/reports">Reportes</a>
   <button onclick="askReset()">Reiniciar demo</button>
 </header>
@@ -308,7 +340,9 @@ function card(o){
   const payRows = paymentRows(o.id, pay);
   const handoffs = o.handoffs || [];
   const confirmedAt = (o.transitions || []).find(t => t.to_state === 'CONFIRMED');
-  const showUpdated = o.state === 'CONFIRMED' && o.edited_at && confirmedAt && o.edited_at > confirmedAt.at;
+  // Any column (Task E): a change after the customer's "sí", by the customer or staff.
+  const showUpdated = o.edited_at && confirmedAt && o.edited_at > confirmedAt.at;
+  const change = o.change || {};
   const acts = (NEXT[o.state] || []).slice();
   if (o.state === 'READY') {
     acts.push(o.fulfilment_type === 'DELIVERY'
@@ -327,6 +361,7 @@ function card(o){
         ${i.modifiers && i.modifiers.length ? '<span class="note">(' + esc(i.modifiers.join(', ')) + ')</span>' : ''}
         ${i.note ? '<span class="note"> — ' + esc(i.note) + '</span>' : ''}</li>`).join('')}</ul>
     <div style="margin-bottom:9px">
+      ${timeTag(o)}
       ${showUpdated ? `<span class="tag warn">Actualizado ${hhmm(o.edited_at)}</span>` : ''}
       <span class="tag">${esc(METODO[pay.method] || 'Sin especificar')}</span>
       ${showProof ? `<span class="tag ${proofClass}">${esc(proofLabel)}</span>` : ''}
@@ -334,9 +369,15 @@ function card(o){
       ${cashOwed ? `<span class="tag warn">Efectivo por cobrar ${money(pay.cash_due)}</span>` : ''}
       ${pay.overpayment_amount ? `<span class="tag warn">Sobrepago ${money(pay.overpayment_amount)}</span>` : ''}
       ${o.delivery_fee ? '<span class="tag">domicilio ' + money(o.delivery_fee) + '</span>' : ''}
+      ${pay.agree ? '<span class="tag bad">Acordar pago</span>' : ''}
       ${o.related_order_id ? '<span class="tag link">pedido aparte</span>' : ''}
+      ${o.map_url ? `<a class="tag link" href="${esc(o.map_url)}" target="_blank" rel="noopener">📍 Ver en el mapa</a>` : ''}
       ${o.chatwoot_link ? `<a class="tag link" href="${esc(o.chatwoot_link)}" target="_blank" rel="noopener">ver conversación</a>` : ''}
+      ${o.notice_failed ? '<button class="tag notice" onclick="showNotices()">Aviso no enviado</button>' : ''}
     </div>
+    ${(change.added || []).map(a => `<div class="added">➕ El cliente agregó: ${a.diff.map(d => esc(d.replace(/^Agregar /, ''))).join(', ')} · ${hhmm(a.resolved_at)}
+        <div class="acts" style="margin-top:7px"><button class="ghost" onclick="seenChange(${o.id}, ${a.id})">Visto</button></div></div>`).join('')}
+    ${change.request ? requestBlock(o, change.request) : ''}
     ${handoffs.length
       ? `<div class="handoff"><b>🙋 Necesita a una persona</b>
           ${handoffs.some(h => h.chatwoot_failed) ? '<span class="tag bad">Chatwoot sin actualizar</span><br>' : ''}
@@ -351,14 +392,36 @@ function card(o){
            <button class="ghost" onclick="registerCash(${o.id}, ${cashPrefill}, ${pay.outstanding || 0})">Registrar efectivo recibido</button>
          </div>` : ''}
     <div class="acts">${acts.map(([e,l,c]) =>
-      `<button class="${c}" onclick="ev(${o.id},'${e}')">${l}</button>`).join('')}</div>
+      `<button class="${c}" onclick="ev(${o.id},'${e}')">${l}</button>`).join('')}
+      ${o.state === 'ACCEPTED' ? `<button class="ghost" onclick="changeTime(${o.id})">Cambiar tiempo</button>` : ''}
+      <button class="ghost" onclick="editOrder(${o.id})">Editar</button></div>
   </div>`;
 }
+
+// A change the customer asked for after acceptance (Task E). Only a PENDING one can be
+// accepted or rejected; while the customer is changing it again, it shows no buttons.
+function requestBlock(o, r){
+  const lines = r.diff.map(d => esc(d)).join('<br>');
+  const totals = `Total: ${money(r.current_total)} → ${money(r.proposed_total)}`;
+  if (r.status !== 'PENDING') {
+    return `<div class="chg"><b>✏️ El cliente está cambiando su solicitud…</b>${lines}</div>`;
+  }
+  return `<div class="chg"><b>✏️ Cambio solicitado · ${hhmm(r.confirmed_at || r.updated_at)}</b>
+      ${lines}<br>${totals}
+      <div class="acts" style="margin-top:7px">
+        <button class="good" onclick="acceptChange(${o.id}, ${r.id}, ${r.revision})">Aceptar cambio</button>
+        <button class="ghost" onclick="rejectChange(${o.id}, ${r.id}, ${r.revision})">Rechazar</button>
+      </div></div>`;
+}
+
+let BOARD = {};                             // the last board, by order id (the editor reads it)
 
 async function draw(){
   let orders;
   try { ({ orders } = await api('/api/board')); }
   catch(e){ return; }                       // server restarting: keep the last view
+  BOARD = Object.fromEntries(orders.map(o => [o.id, o]));
+  drawNotices();
   document.getElementById('board').innerHTML = COLS.map(([state, label]) => {
     const list = orders.filter(o => o.state === state);
     return `<section class="col"><h2>${label}<span class="count">${list.length}</span></h2>
@@ -374,7 +437,69 @@ async function send(id, event, reason){
   await draw();
 }
 
+// The minutes staff can pick (config/restaurant.json), loaded once.
+let PREP = null;
+async function prepOptions(){
+  if(!PREP) PREP = (await api('/api/menu')).prep_minutes;
+  return PREP;
+}
+
+// One tap: each button is a number of minutes from now. None is preselected: staff
+// must choose, never accept a time by habit.
+async function pickMinutes(title, help, onPick){
+  let options;
+  try { options = await prepOptions(); } catch(e){ toast(e.message); return; }
+  const back = document.createElement('div');
+  back.className = 'back';
+  back.innerHTML = `<div class="modal"><h3>${esc(title)}</h3><p>${esc(help)}</p>
+      <div class="mins">${options.map(m =>
+        `<button class="ghost" data-m="${m}">${m} min</button>`).join('')}</div>
+      <div class="row"><button class="ghost" id="mno">Volver</button></div></div>`;
+  document.body.appendChild(back);
+  const close = () => back.remove();
+  back.querySelector('#mno').onclick = close;
+  back.onclick = e => { if(e.target === back) close(); };
+  back.addEventListener('keydown', e => { if(e.key === 'Escape') close(); });
+  back.querySelectorAll('[data-m]').forEach(b => b.onclick = async () => {
+    close();
+    try { await onPick(Number(b.dataset.m)); } catch(e){ toast(e.message); }
+  });
+  back.querySelector('#mno').focus();
+}
+
+function acceptOrder(id){
+  pickMinutes('Aceptar pedido', '¿Cuánto tarda el pedido? El cliente recibe «aproximadamente X minutos».',
+    async minutes => {
+      await api(`/api/orders/${id}/event`, {
+        method:'POST', headers:{'content-type':'application/json'},
+        body: JSON.stringify({event:'staff_accepts', minutes}),
+      });
+      await draw();
+    });
+}
+
+function changeTime(id){
+  pickMinutes('Cambiar tiempo', 'Minutos que le faltan desde ahora. El cliente recibe el nuevo tiempo.',
+    async minutes => {
+      await api(`/api/orders/${id}/ready_by`, {
+        method:'POST', headers:{'content-type':'application/json'},
+        body: JSON.stringify({minutes}),
+      });
+      await draw();
+    });
+}
+
+// The staff's estimate on the card while the order is being made.
+function timeTag(o){
+  if(!o.ready_by || o.state !== 'ACCEPTED') return '';
+  const mins = Math.round((Date.parse(o.ready_by) - Date.now()) / 60000);
+  return mins >= 0
+    ? `<span class="tag">⏱ Listo ${hhmm(o.ready_by)} · faltan ${mins} min</span>`
+    : `<span class="tag bad">⏱ Listo ${hhmm(o.ready_by)} · atrasado ${-mins} min</span>`;
+}
+
 function ev(id, event){
+  if(event === 'staff_accepts'){ acceptOrder(id); return; }
   const needs = NEEDS_REASON[event];
   if(!needs){ send(id, event).catch(e => toast(e.message)); return; }
   const [title, help] = needs;
@@ -474,6 +599,261 @@ function registerCash(id, prefill, outstanding){
       await draw();
     },
   });
+}
+
+// ---- Task E: changes after acceptance, the staff's Editar, notices -----------------
+
+// A dialog on body (the 2 s redraw never touches it). Returns the box to fill.
+function overlay(){
+  const back = document.createElement('div');
+  back.className = 'back';
+  back.innerHTML = '<div class="modal wide"></div>';
+  back.onclick = e => { if(e.target === back) back.remove(); };
+  document.body.appendChild(back);
+  const box = back.querySelector('.modal');
+  box.close = () => back.remove();
+  return box;
+}
+
+const DRIVER_BOX = `<label class="check"><input type="checkbox" id="driverok">
+  <span>Ya coordiné con el domiciliario: dirección, productos y cobro.</span></label>`;
+const READY_NOTE = '<div class="warnbox">Si hay que preparar algo, use «Volver a preparar».</div>';
+
+// The step every change goes through before it is saved: the customer's exact message,
+// computed by the server (the panel computes no totals).
+function previewStep(box, title, r, state, onBack, onSave){
+  box.innerHTML = `<h3>${esc(title)}</h3>
+    <p>Nuevo total: <b>${money(r.order.total)}</b>. Mensaje que recibirá el cliente:</p>
+    <pre class="msg">${esc(r.message)}</pre>
+    ${state === 'READY' ? READY_NOTE : ''}
+    ${state === 'OUT_FOR_DELIVERY' ? DRIVER_BOX : ''}
+    <div class="err" id="perr"></div>
+    <div class="row"><button class="ghost" id="pback">Volver</button>
+    <button id="psave">Guardar y avisar al cliente</button></div>`;
+  box.querySelector('#pback').onclick = onBack;
+  box.querySelector('#psave').onclick = async () => {
+    const driver = box.querySelector('#driverok');
+    try { await onSave(driver ? driver.checked : false); }
+    catch(e){ box.querySelector('#perr').textContent = e.message; }
+  };
+}
+
+async function acceptChange(orderId, changeId, revision){
+  const box = overlay();
+  box.innerHTML = '<h3>Aceptar cambio</h3><p>Revisando…</p>';
+  const url = `/api/orders/${orderId}/changes/${changeId}/accept`;
+  const post = body => api(url, {method:'POST', headers:{'content-type':'application/json'},
+                                 body: JSON.stringify({revision, ...body})});
+  let r;
+  try { r = await post({preview: true}); }
+  catch(e){ box.innerHTML = `<h3>Aceptar cambio</h3><div class="err">${esc(e.message)}</div>
+              <div class="row"><button class="ghost" onclick="this.closest('.back').remove()">Volver</button></div>`; return; }
+  const state = (BOARD[orderId] || {}).state;
+  previewStep(box, 'Aceptar cambio', r, state, box.close, async driver_ok => {
+    await post({token: r.token, driver_ok});
+    box.close(); await draw(); toast('Cambio aplicado. Se le avisó al cliente.');
+  });
+}
+
+function rejectChange(orderId, changeId, revision){
+  modal({
+    title: 'Rechazar el cambio',
+    help: 'El cliente recibirá este motivo. Su pedido sigue igual.',
+    required: true, confirmText: 'Rechazar y avisar al cliente',
+    placeholder: 'Ej: se nos acabó el maduro',
+    onConfirm: async reason => {
+      await api(`/api/orders/${orderId}/changes/${changeId}/reject`, {
+        method:'POST', headers:{'content-type':'application/json'},
+        body: JSON.stringify({revision, reason}),
+      });
+      await draw();
+    },
+  });
+}
+
+function seenChange(orderId, changeId){
+  api(`/api/orders/${orderId}/changes/${changeId}/seen`, {method:'POST'}).then(draw)
+    .catch(e => toast(e.message));
+}
+
+// ---- Editar: any card, any column ----
+
+let MENU = null;
+async function menu(){
+  if (!MENU) {
+    MENU = await api('/api/menu');
+    MENU.items = {};
+    MENU.byName = {};
+    for (const c of MENU.categories) for (const i of c.items) {
+      MENU.items[i.id] = i;
+      for (const m of i.modifiers) MENU.byName[m.name] = m.id;
+    }
+  }
+  return MENU;
+}
+
+let ED = null;                              // the editor that is open
+
+async function editOrder(id){
+  const o = BOARD[id];
+  if (!o) return;
+  let m;
+  try { m = await menu(); } catch(e){ toast(e.message); return; }
+  ED = {
+    o, box: overlay(), clear_location: false,
+    fulfilment: o.fulfilment_type, address: o.address || '', zone: o.zone || '',
+    // Stored lines keep modifier names; one no longer on the menu blocks saving.
+    lines: o.items.map(i => ({
+      item_id: i.item_id, qty: i.qty, note: i.note || '',
+      modifier_ids: (i.modifiers || []).filter(n => m.byName[n]).map(n => m.byName[n]),
+      unknown: (i.modifiers || []).filter(n => !m.byName[n]),
+    })),
+  };
+  drawEditor();
+}
+
+function modName(id){
+  for (const i of Object.values(MENU.items)) {
+    const found = i.modifiers.find(x => x.id === id);
+    if (found) return found.name;
+  }
+  return id;
+}
+
+function drawEditor(error){
+  const {o, box} = ED;
+  const lines = ED.lines.map((l, n) => {
+    const item = MENU.items[l.item_id] || {name: l.item_id, modifiers: []};
+    const chips = l.modifier_ids.map((mid, k) =>
+      `<span class="chip">${esc(modName(mid))}<button aria-label="Quitar" onclick="edDropMod(${n},${k})">✕</button></span>`)
+      .concat(l.unknown.map((name, k) => `<span class="chip bad">${esc(name)} (ya no está en la carta)
+        <button aria-label="Quitar" onclick="edDropUnknown(${n},${k})">✕</button></span>`)).join('');
+    const options = item.modifiers.map(x => `<option value="${esc(x.id)}">${esc(x.name)} · ${money(x.price)}</option>`).join('');
+    return `<div class="eline">
+      <div class="erow">
+        <button class="mini" aria-label="Menos" onclick="edQty(${n},-1)">−</button><b>${l.qty}</b>
+        <button class="mini" aria-label="Más" onclick="edQty(${n},1)">+</button>
+        <span class="ename">${esc(item.name)}</span>
+        <button class="mini" aria-label="Quitar producto" onclick="edDrop(${n})">✕</button>
+      </div>
+      ${chips ? `<div class="chips">${chips}</div>` : ''}
+      <div class="erow" style="margin-top:6px">
+        ${options ? `<select onchange="edAddMod(${n}, this.value)"><option value="">Adición…</option>${options}</select>` : ''}
+        <input class="einput" style="flex:1;min-width:140px;width:auto" maxlength="120" placeholder="Nota (opcional)"
+          value="${esc(l.note)}" oninput="ED.lines[${n}].note = this.value">
+      </div></div>`;
+  }).join('') || '<p>Sin productos.</p>';
+  const products = MENU.categories.map(c => `<optgroup label="${esc(c.name)}">${c.items.map(i =>
+    `<option value="${esc(i.id)}">${esc(i.name)} · ${money(i.price)}${i.available ? '' : ' (agotado)'}</option>`).join('')}</optgroup>`).join('');
+  const zones = MENU.zones.map(z => `<option value="${esc(z.name)}">`).join('');
+  const delivery = ED.fulfilment === 'DELIVERY';
+  const pending = o.change && o.change.request;
+  box.innerHTML = `<h3>Editar pedido ${esc(o.code)}</h3>
+    <p>El total lo calcula el sistema al revisar.</p>
+    ${lines}
+    <div class="erow esec"><select id="eadd">${products}</select>
+      <button class="mini" onclick="edAdd()">Agregar producto</button></div>
+    <div class="esec">
+      <label><input type="radio" name="ef" ${delivery ? '' : 'checked'} onchange="edFulfil('PICKUP')"> Recoge</label>
+      <label><input type="radio" name="ef" ${delivery ? 'checked' : ''} onchange="edFulfil('DELIVERY')"> Domicilio</label>
+    </div>
+    ${delivery ? `<div class="esec">
+      <input class="einput" maxlength="200" placeholder="Dirección" value="${esc(ED.address)}" oninput="ED.address = this.value">
+      <input class="einput" style="margin-top:6px" maxlength="80" list="ezones" placeholder="Barrio"
+        value="${esc(ED.zone)}" oninput="ED.zone = this.value"><datalist id="ezones">${zones}</datalist>
+    </div>` : ''}
+    ${o.location ? `<label class="check"><input type="checkbox" ${ED.clear_location ? 'checked' : ''}
+        onchange="ED.clear_location = this.checked"> <span>📍 Quitar ubicación</span></label>` : ''}
+    ${pending ? '<div class="warnbox">Hay un cambio pedido por el cliente: al guardar se cierra.</div>' : ''}
+    <div class="err">${esc(error || '')}</div>
+    <div class="row"><button class="ghost" onclick="ED.box.close()">Volver</button>
+    <button onclick="edReview()">Revisar cambios</button></div>`;
+}
+
+function edQty(n, step){ const l = ED.lines[n]; l.qty = Math.min(50, Math.max(1, l.qty + step)); drawEditor(); }
+function edDrop(n){ ED.lines.splice(n, 1); drawEditor(); }
+function edDropMod(n, k){ ED.lines[n].modifier_ids.splice(k, 1); drawEditor(); }
+function edDropUnknown(n, k){ ED.lines[n].unknown.splice(k, 1); drawEditor(); }
+function edAddMod(n, id){ if (id) { ED.lines[n].modifier_ids.push(id); } drawEditor(); }
+function edAdd(){
+  const id = ED.box.querySelector('#eadd').value;
+  ED.lines.push({item_id: id, qty: 1, note: '', modifier_ids: [], unknown: []});
+  drawEditor();
+}
+function edFulfil(f){ ED.fulfilment = f; drawEditor(); }
+
+function edBody(extra){
+  return JSON.stringify({
+    lines: ED.lines.map(l => ({item_id: l.item_id, qty: l.qty, modifier_ids: l.modifier_ids,
+                               note: l.note.trim() || null})),
+    fulfilment: ED.fulfilment,
+    address: ED.fulfilment === 'DELIVERY' ? (ED.address.trim() || null) : null,
+    zone: ED.fulfilment === 'DELIVERY' ? (ED.zone.trim() || null) : null,
+    clear_location: ED.clear_location, ...extra,
+  });
+}
+
+async function edReview(){
+  if (ED.lines.some(l => l.unknown.length)) {
+    drawEditor('Quite las adiciones que ya no están en la carta para guardar.');
+    return;
+  }
+  const url = `/api/orders/${ED.o.id}/edit`;
+  let r;
+  try { r = await api(url, {method:'POST', headers:{'content-type':'application/json'}, body: edBody({preview: true})}); }
+  catch(e){ drawEditor(e.message); return; }
+  if (!r.changed) { drawEditor('No cambió nada.'); return; }
+  const ed = ED;
+  if (!r.message) {                         // only the pin was removed: nothing to tell
+    await api(url, {method:'POST', headers:{'content-type':'application/json'}, body: edBody({token: r.token})})
+      .then(() => { ed.box.close(); draw(); toast('Ubicación quitada.'); })
+      .catch(e => drawEditor(e.message));
+    return;
+  }
+  previewStep(ed.box, `Revisar cambios · ${ed.o.code}`, r, ed.o.state, () => { ED = ed; drawEditor(); },
+    async driver_ok => {
+      await api(url, {method:'POST', headers:{'content-type':'application/json'},
+                      body: edBody({token: r.token, driver_ok})});
+      ed.box.close(); await draw(); toast('Pedido actualizado. Se le avisó al cliente.');
+    });
+}
+
+// ---- notices that did not reach the customer ----
+
+let NOTICES = [];
+async function drawNotices(){
+  try { ({ notices: NOTICES } = await api('/api/notices/failed')); } catch(e){ return; }
+  const button = document.getElementById('notices');
+  button.hidden = !NOTICES.length;
+  button.textContent = `⚠ Avisos sin enviar (${NOTICES.length})`;
+}
+
+function showNotices(){
+  const box = overlay();
+  const fill = () => {
+    box.innerHTML = `<h3>Avisos sin enviar</h3>
+      <p>Mensajes al cliente que no salieron. «Reenviar» los manda otra vez; uno que decía cómo
+        quedó el pedido sale con el pedido como está ahora.</p>
+      ${NOTICES.map(n => `<div class="nrow"><span>${hhmm(n.at)} · ${esc(n.code || '')} · ${esc(n.first_line)}
+          ${n.status === 'SENDING' ? ' (resultado desconocido)' : ''}</span>
+        <button class="mini" onclick="resendNotice(${n.id}, this)">Reenviar</button></div>`).join('')
+        || '<p>No hay avisos pendientes.</p>'}
+      <div class="row"><button class="ghost" onclick="this.closest('.back').remove()">Cerrar</button></div>`;
+  };
+  fill();
+  box.refill = fill;
+}
+
+async function resendNotice(id, button){
+  button.disabled = true;
+  try {
+    const r = await api(`/api/notices/${id}/resend`, {method:'POST'});
+    toast(r.sent ? 'Aviso enviado.' : 'No se pudo enviar otra vez.');
+  } catch(e){ toast(e.message); }
+  const box = button.closest('.modal');
+  await drawNotices();                      // the list below must show the new state
+  if (box && box.refill) box.refill();
+  draw();
 }
 
 function askReset(){

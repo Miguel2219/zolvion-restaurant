@@ -94,8 +94,8 @@ separates a `tool_use` from its `tool_result`. Keep both when touching `brain.re
 
 ## 4. Old references in the code (glossary)
 
-Comments cite documents from the separate `zolvion-restaurant` project and labels from
-task plans. Those documents are **not** part of this project. What each means here:
+Comments cite documents from an earlier queue/AWS design, dropped on 2026-10-21, and labels
+from task plans. Those documents no longer exist. What each means here:
 
 | Reference in comments | Meaning in this code |
 |---|---|
@@ -111,7 +111,7 @@ task plans. Those documents are **not** part of this project. What each means he
 | P-0458, P-0644, P-3564, P-4766, P-6455, P-9950 | Orders from Miguel's manual runs whose bugs a fix or test refers to (`CURRENT-STATE.md` §3, Notion checklists). P-4438 also serves as a sample code in the R9 cleaning tests |
 | "Task A / A' / B / C / C2 / D" | Lettered work packages, `CURRENT-STATE.md` §2 |
 
-Where the MVP and the old design differ, the MVP wins. Examples: the MVP edits an
+The old design is not a reference for anything. Examples of where it differed: the code edits an
 unaccepted order in place (old design: cancel and recreate); the MVP has no
 `IN_PREPARATION` state; the MVP models cash/transfer/mixed payments and one row per
 receipt.

@@ -302,6 +302,126 @@ def test_proof_to_a_stranger_is_still_flagged():
     assert record["status"] == "FLAGGED"
 
 
+def _hidden(name: str, keep: int, mask: str = "*****") -> str:
+    """The holder as a bank hides it: 'MIG***** PAB*****' for keep=3."""
+    return " ".join(word[:keep].upper() + mask for word in name.split())
+
+
+@pytest.mark.parametrize("holder", [
+    _hidden(HOLDER, 3),                                  # Nequi: MIG***** PAB*****
+    _hidden(HOLDER, 1, "***"),                           # M*** P***
+    " ".join(w[:4] + "..." for w in HOLDER.split()),     # cut: Migu... Paba...
+    HOLDER.split()[0] + " " + HOLDER.split()[1][:3],     # Bancolombia: MIGUEL PAB
+])
+def test_hidden_or_cut_holder_name_is_accepted(holder):
+    """Row 38: every bank hides the name its own way, and none shows the number."""
+    record = payments.check_proof(_transfer_order()["id"], {
+        "amount": ESPECIAL, "destination_account": None, "destination_holder": holder,
+        "reference": None, "date_iso": _iso(),
+    })
+    assert record["status"] == "PROOF_RECEIVED", (holder, record["receipt"]["flags"])
+
+
+@pytest.mark.parametrize("holder", [
+    "PED***** RAM*****",                                 # a stranger, hidden
+    _hidden(HOLDER, 3).split()[0],                       # only one word: too little
+    _hidden(HOLDER.split()[0], 3) + " ZZZ*****",         # second word contradicts
+])
+def test_hidden_holder_of_someone_else_is_flagged(holder):
+    record = payments.check_proof(_transfer_order()["id"], {
+        "amount": ESPECIAL, "destination_account": None, "destination_holder": holder,
+        "reference": None, "date_iso": _iso(),
+    })
+    assert record["status"] == "FLAGGED"
+
+
+def test_last_four_with_the_holder_is_accepted():
+    """Bancolombia: *****7389 alone proves nothing, with the holder name it does."""
+    digits = "".join(ch for ch in str(ACCOUNT) if ch.isdigit())
+    record = payments.check_proof(_transfer_order()["id"], {
+        "amount": ESPECIAL, "destination_account": "*****" + digits[-4:],
+        "destination_holder": _hidden(HOLDER, 3), "reference": None, "date_iso": _iso(),
+    })
+    assert record["status"] == "PROOF_RECEIVED", record["receipt"]["flags"]
+
+
+def test_last_four_alone_or_wrong_is_flagged():
+    digits = "".join(ch for ch in str(ACCOUNT) if ch.isdigit())
+    alone = payments.check_proof(_transfer_order()["id"], {
+        "amount": ESPECIAL, "destination_account": "*****" + digits[-4:],
+        "reference": None, "date_iso": _iso(),
+    })
+    wrong = payments.check_proof(_transfer_order()["id"], {
+        "amount": ESPECIAL, "destination_account": "*****0000",
+        "destination_holder": HOLDER, "reference": None, "date_iso": _iso(),
+    })
+    assert alone["status"] == wrong["status"] == "FLAGGED"
+
+
+def test_provider_name_as_destination_falls_back_to_the_holder():
+    record = payments.check_proof(_transfer_order()["id"], {
+        "amount": ESPECIAL, "destination_account": "Nequi",
+        "destination_holder": _hidden(HOLDER, 3), "reference": None, "date_iso": _iso(),
+    })
+    assert record["status"] == "PROOF_RECEIVED", record["receipt"]["flags"]
+
+
+# ---- a receipt with no reference sent twice (row 38) ---------------------
+
+def _nequi(minutes_ago: float = 0, **fields) -> dict:
+    """Nequi's «Enviaste tu dinero»: hidden holder, no number, no reference."""
+    stamp = datetime.now(CATALOG.timezone()).replace(second=0, microsecond=0)
+    return {"amount": ESPECIAL, "destination_account": None,
+            "destination_holder": _hidden(HOLDER, 3), "reference": None, "provider": "Nequi",
+            "date_iso": (stamp - timedelta(minutes=minutes_ago)).isoformat(), **fields}
+
+
+def test_same_screenshot_twice_on_one_order_is_a_resend():
+    order = _transfer_order()
+    first = payments.check_proof(order["id"], _nequi())
+    again = payments.check_proof(order["id"], _nequi(destination_holder="MIG***** PAB***"))
+    assert first["status"] == "PROOF_RECEIVED", first["receipt"]["flags"]
+    assert again["resent"] and again["receipt"] is None
+    assert len(payments.receipts(order["id"])) == 1
+
+
+def test_a_resend_of_a_discarded_copy_gives_the_reason_again():
+    order = _transfer_order()
+    first = payments.check_proof(order["id"], _nequi())
+    payments.discard_receipt(order["id"], first["receipt"]["id"], "no llegó a la cuenta")
+    again = payments.check_proof(order["id"], _nequi())
+    assert again["resent"] and again["resent_discard_reason"] == "no llegó a la cuenta"
+
+
+def test_the_same_screenshot_on_another_order_is_red():
+    payments.check_proof(_transfer_order()["id"], _nequi())
+    other = payments.check_proof(_transfer_order()["id"], _nequi())
+    assert other["status"] == "FLAGGED"
+    assert any("parece el mismo" in f for f in other["receipt"]["flags"])
+
+
+@pytest.mark.parametrize("change", [
+    {"minutes_ago": 5},                                  # another minute
+    {"origin_holder": "Pedro Ramirez"},                  # a field that disagrees
+    {"amount": ESPECIAL - 1000},                         # another amount
+])
+def test_a_different_receipt_is_not_a_copy(change):
+    payments.check_proof(_transfer_order()["id"], _nequi(origin_holder="Ana Gomez"))
+    minutes = change.pop("minutes_ago", 0)
+    record = payments.check_proof(_transfer_order()["id"], _nequi(minutes, **{
+        "origin_holder": "Ana Gomez", **change}))
+    assert not record["resent"]
+    assert not any("parece el mismo" in f for f in record["receipt"]["flags"])
+
+
+def test_no_readable_date_is_never_called_a_copy():
+    order = _transfer_order()
+    payments.check_proof(order["id"], _nequi(date_iso=None))
+    again = payments.check_proof(order["id"], _nequi(date_iso=None))
+    assert not again["resent"]
+    assert len(payments.receipts(order["id"])) == 2
+
+
 def test_mixed_split_must_sum_to_the_total():
     order = _pickup_order()
     with pytest.raises(payments.PaymentError):
@@ -693,7 +813,7 @@ def test_cash_then_a_confirmed_transfer_is_a_surplus(monkeypatch):
     )["body"]
     assert last == (
         f"Confirmamos su pago. Vimos que envió {fmt(transfer)} de más; "
-        "el local se va a comunicar con usted por el excedente."
+        "esa diferencia quedó anotada y puede pedirle al local que se la devuelva."
     )
     assert order["code"] not in last
     assert "cocina" not in last.lower()
@@ -1122,16 +1242,16 @@ def test_amend_refuses_an_accepted_order():
 
 # ---- handoff to a person (Task B) --------------------------------------
 
-def test_change_to_an_accepted_order_goes_to_a_person():
+def test_change_to_an_accepted_order_becomes_a_proposal():
+    """Task E: no longer a handoff. Nothing changes until the customer confirms."""
     order = _accepted_order()
     result = brain._run_tool(PHONE, "add_item", {"item_id": "d_gaseosa_personal"})
     assert "error interno" not in result
-    assert "PASADO A UNA PERSONA" in result
+    assert result.startswith("PROPUESTA")
     updated = orders.get(order["id"])
-    handoffs = updated["handoffs"]
-    assert len(handoffs) == 1
-    assert "Gaseosa" in handoffs[0]["summary"]
+    assert updated["handoffs"] == []
     assert updated["total"] == order["total"]
+    assert db.q1("SELECT status FROM change_requests")["status"] == "PROPOSED"
 
 
 def test_cancel_by_chat_after_acceptance_goes_to_a_person():
@@ -1146,8 +1266,8 @@ def test_cancel_by_chat_after_acceptance_goes_to_a_person():
 
 def test_handoff_is_not_duplicated_and_staff_resolve_it():
     order = _accepted_order()
-    first = brain._run_tool(PHONE, "add_item", {"item_id": "d_gaseosa_personal"})
-    second = brain._run_tool(PHONE, "add_item", {"item_id": "d_gaseosa_personal"})
+    first = brain._run_tool(PHONE, "cancel_order", {})
+    second = brain._run_tool(PHONE, "cancel_order", {})
     assert "error interno" not in first and "error interno" not in second
     assert len(orders.get(order["id"])["handoffs"]) == 1
     handoff.resolve(order["id"])
@@ -1514,7 +1634,8 @@ def test_edit_below_registered_cash_reports_the_surplus(with_transfer):
     assert "error interno" not in result
     assert (
         f"«{paid_in} Su pedido ya está pagado completo. Pagó {fmt(GASEOSA)} más que el total "
-        "del pedido; el local se comunicará con usted por esa diferencia.»" in result
+        "del pedido; esa diferencia quedó anotada y puede pedirle al local que se la "
+        "devuelva.»" in result
     )
     assert "No le prometas devolución" in result
     assert orders.get(order["id"])["payment"]["overpayment_amount"] == GASEOSA
@@ -3032,6 +3153,17 @@ def test_a_missing_sentence_is_appended_without_another_call(monkeypatch, chat):
     assert _last_sent_in_history() == reply
 
 
+def test_the_sentence_mid_reply_in_lower_case_is_not_appended_again(monkeypatch, chat):
+    # Task E hand test row 17: «…y quedan $X por pagar…» got the sentence a second time.
+    _transfer_order()
+    sentence = _added_gaseosa_sentence()
+    draft = f"Listo, le agregué la gaseosa y {sentence[0].lower()}{sentence[1:]}"
+    calls = _scripted(monkeypatch, _use("add_item", {"item_id": "d_gaseosa_personal"}),
+                      _say(draft))
+    assert _customer_says("Agrégueme una gaseosa personal") == draft
+    assert len(calls) == 2
+
+
 def test_a_contradictory_draft_is_corrected_once(monkeypatch, chat):
     _transfer_order()
     good = f"Listo, le agregué la gaseosa. {_added_gaseosa_sentence()}"
@@ -3117,6 +3249,109 @@ def test_the_backstop_replaces_an_unchecked_payment_claim(monkeypatch, chat):
     assert "tool_choice" not in calls[0]                         # not a payment question
     assert calls[1]["tool_choice"] == {"type": "tool", "name": "order_status"}
     assert calls[2]["tool_choice"] == {"type": "none"}
+
+
+def _lowered_mixed_order(monkeypatch):
+    """Task E hand test row 24: 2 Caserita, MIXED with $20.000 by transfer, accepted; the
+    staff's Editar lowers it to 1 Caserita, which undoes the split and asks the method
+    again. Returns the old split's cash part, which no figure has any more."""
+    order = _order_of(("b_caserita", 2), method="MIXED", transfer=20000)
+    stale = order["total"] - 20000                               # $17.800
+    assert fmt(stale) in brain.payment_sentence_for(PHONE)
+    orders.apply_event(order["id"], "staff_accepts")
+    client = _client(monkeypatch)
+    url = f"/api/orders/{order['id']}/edit"
+    body = {"lines": [{"item_id": "b_caserita", "qty": 1, "modifier_ids": [], "note": None}],
+            "fulfilment": "PICKUP"}
+    preview = client.post(url, json={**body, "preview": True}).json()
+    assert brain.METHOD_QUESTION in preview["message"]
+    assert client.post(url, json={**body, "token": preview["token"]}).status_code == 200
+    pay = payments.current(order["id"])
+    assert (pay["method"], pay["to_pay"]) == ("UNSPECIFIED", CASERITA)
+    assert stale not in CATALOG.prices()
+    return stale
+
+
+def test_a_stale_amount_without_a_balance_word_is_corrected(monkeypatch, chat):
+    stale = _lowered_mixed_order(monkeypatch)
+    draft = f"¡Perfecto! Entonces, ¿cómo va a pagar la parte de {fmt(stale)}?"
+    assert not brain._talks_payment(draft)                       # what let it through
+    sentence = brain.payment_sentence_for(PHONE)                 # "Falta por pagar $18.900."
+    good = f"Perfecto. {sentence} ¿Lo paga todo en efectivo?"
+    calls = _scripted(monkeypatch, _say(draft), _use("order_status"), _say(good))
+    reply = _customer_says("en efefctivo")
+    assert reply == good and fmt(stale) not in reply
+    assert len(calls) == 3
+    assert "tool_choice" not in calls[0]                         # the typo is no payment word
+    assert calls[1]["tool_choice"] == {"type": "tool", "name": "order_status"}
+    assert calls[2]["tool_choice"] == {"type": "none"}
+    assert _last_sent_in_history() == reply
+
+
+def test_a_stale_amount_still_there_gets_the_safe_reply(monkeypatch, chat):
+    stale = _lowered_mixed_order(monkeypatch)
+    draft = f"¿Cómo va a pagar la parte de {fmt(stale)}?"
+    calls = _scripted(monkeypatch, _say(draft), _use("order_status"), _say(draft), _say(draft))
+    reply = _customer_says("en efefctivo")
+    assert reply == brain.payment_sentence_for(PHONE) and fmt(stale) not in reply
+    assert len(calls) == 4
+    assert "Tu borrador anterior" in calls[3]["system"]
+    assert _last_sent_in_history() == reply
+
+
+@pytest.mark.parametrize("quote", ["total", "price", "fee", "cash_part"])
+def test_an_amount_code_knows_costs_no_extra_call(monkeypatch, chat, quote):
+    order = _order_of(("b_caserita", 2), method="MIXED", transfer=20000)
+    zone = CATALOG.fulfilment["delivery_zones"][-1]
+    draft = {
+        "total": f"Sus 2 Caseritas suman {fmt(order['total'])}.",
+        "price": f"La gaseosa personal vale {fmt(GASEOSA)}.",
+        "fee": f"El domicilio a {zone['name']} vale {fmt(zone['fee'])}.",
+        # The cash part is still the order's own: a figure is stale only once it changed.
+        "cash_part": f"Con gusto le llevamos vueltos para los {fmt(order['total'] - 20000)} en efectivo.",
+    }[quote]
+    calls = _scripted(monkeypatch, _say(draft))
+    assert _customer_says("¿Y eso cuánto es?") == draft
+    assert len(calls) == 1
+
+
+def test_code_built_amounts_cost_no_extra_call(monkeypatch, chat):
+    order = _order_of(("b_caserita", 2))
+    summary = f"Lleva 2 Caseritas: {fmt(order['items'][0]['line_total'])}. Total {fmt(order['total'])}."
+    calls = _scripted(monkeypatch, _use("show_cart"), _say(summary))
+    assert _customer_says("¿Cómo va mi pedido?") == summary
+    assert len(calls) == 2
+
+    # A proposal: its line price and new total are no figure of the order yet.
+    orders.apply_event(order["id"], "staff_accepts")
+    calls = _scripted(monkeypatch, _use("add_item", {"item_id": "d_gaseosa_personal", "qty": 3}),
+                      _say("Listo."))
+    proposed = order["total"] + 3 * GASEOSA
+    assert _customer_says("Agrégueme 3 gaseosas personales") == (
+        f"Agregar 3× Gaseosa personal ({fmt(3 * GASEOSA)}). Su pedido quedaría en "
+        f"{fmt(proposed)}. ¿Lo agregamos?")
+    assert len(calls) == 2
+    later = f"Si lo agregamos, su pedido quedaría en {fmt(proposed)}."
+    calls = _scripted(monkeypatch, _say(later))
+    assert _customer_says("¿En cuánto quedaría?") == later       # the open request's total
+    assert len(calls) == 1
+
+    # A separate order's cart, quoted from an earlier turn.
+    assert "no cambiamos nada" in brain._run_tool(PHONE, "discard_change", {})
+    assert brain._run_tool(PHONE, "start_separate_order", {}).startswith("Listo")
+    cart.add_item(PHONE, "d_gaseosa_personal", 3)
+    later = f"Su pedido aparte va en {fmt(3 * GASEOSA)}."
+    calls = _scripted(monkeypatch, _say(later))
+    assert _customer_says("¿Y el otro cuánto va?") == later
+    assert len(calls) == 1
+
+
+def test_a_reply_with_no_amount_is_untouched(monkeypatch, chat):
+    _lowered_mixed_order(monkeypatch)
+    draft = "¡Perfecto! ¿Me confirma que lo paga todo en efectivo?"
+    calls = _scripted(monkeypatch, _say(draft))
+    assert _customer_says("en efefctivo") == draft
+    assert len(calls) == 1
 
 
 def test_a_claim_after_confirm_order_is_still_checked(monkeypatch, chat):

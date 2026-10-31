@@ -90,7 +90,7 @@ CHATWOOT_URL=http://localhost:3000
 CHATWOOT_ACCOUNT_ID=1
 CHATWOOT_BOT_TOKEN=<access token>
 CHATWOOT_BOT_SECRET=<webhook secret>
-MESSAGE_WAIT_SECONDS=4
+MESSAGE_WAIT_SECONDS=6
 ```
 
 All four `CHATWOOT_*` set = Chatwoot mode: Meta's `/webhook` in Zolvion answers 404 and the

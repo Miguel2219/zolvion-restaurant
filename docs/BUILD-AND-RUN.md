@@ -55,7 +55,9 @@ The virtualenv folder is `venv/` (ignored by git). If PowerShell blocks activati
 | `ANTHROPIC_MODEL` | The conversation model (`claude-haiku-5-5`). It must accept a forced `tool_choice`: Sonnet 5.5 and Opus 5.5 don't, and payment questions fail with a 400 (G34). Empty → the first available haiku, then sonnet, then opus |
 | `ANTHROPIC_PROOF_MODEL` | The model that reads receipt images (`claude-sonnet-5-5`). Empty → the same as `ANTHROPIC_MODEL` |
 | `CHATWOOT_URL`, `CHATWOOT_ACCOUNT_ID`, `CHATWOOT_BOT_TOKEN`, `CHATWOOT_BOT_SECRET` | All four → WhatsApp through Chatwoot (`CHATWOOT-SETUP.md`); the `WHATSAPP_*` values are then unused. Some missing → the banner says "FALTA" and every webhook is refused |
-| `MESSAGE_WAIT_SECONDS` | Seconds after a customer's last message before the bot answers, so several messages get one answer (default 4) |
+| `ELEVENLABS_API_KEY` | Voice notes (ElevenLabs Scribe v2). Empty: the bot asks the customer to write instead. Tests always blank it |
+| `VOICE_MAX_MB` | Largest voice note sent to be transcribed (default 2) |
+| `MESSAGE_WAIT_SECONDS` | Seconds after a customer's last message before the bot answers, so several messages get one answer (default 6) |
 | `WHATSAPP_TOKEN` | Without Chatwoot: empty → **FAKE mode**, no message leaves (replies are only stored in `outbound_messages`, as the tests read them) |
 | `WHATSAPP_PHONE_NUMBER_ID` | The sending number's id in Meta (Meta mode needs both this and the token) |
 | `WHATSAPP_APP_SECRET` | Checks Meta's webhook signature. Empty → the check is skipped |
@@ -70,7 +72,7 @@ The virtualenv folder is `venv/` (ignored by git). If PowerShell blocks activati
 ```powershell
 uvicorn app.main:app --reload --port 8000
 
-python -m pytest tests -q                                    # all tests (356 pass, 1 xfail)
+python -m pytest tests -q                                    # all tests (448 pass, 1 xfail)
 python -m pytest tests -q -k wrong_amount                    # by name
 python -m pytest tests/test_flow.py::test_happy_path_pickup  # one test
 ```
@@ -116,8 +118,8 @@ customer side is a real phone. `/kitchen?alert=20` fires the unaccepted-order al
   check, "Cómo pagaron").
 - Not covered: what the real AI decides (tool choice, wording). The Notion checklists and
   `TEST.md` test that by hand.
-- Result on 2026-10-17 (Task D Part 2): 356 passed, 1 xfailed (the G16 expected failure
-  in `tests/test_review_bugs.py`) in about 60 s; the warnings are `on_event` deprecations
+- Result on 2026-10-22 (Task E): 448 passed, 1 xfailed (the G16 expected failure
+  in `tests/test_review_bugs.py`) in about 45 s; `tests/test_task_e.py` covers Task E; the warnings are `on_event` deprecations
   and one from Starlette's test client (G10).
 
 ## 6. Connecting real WhatsApp

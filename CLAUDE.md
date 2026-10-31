@@ -5,16 +5,16 @@ Guidance for Claude Code in this repository. Details live in `docs/` (start at
 
 ## What this is
 
-The MVP of Zolvion Restaurant: WhatsApp ordering for restaurants, which Miguel demos and
-sells; launch city Ocaña (Norte de Santander). Caseritas Burger is a test restaurant, not a
-prospect. One FastAPI process with one worker thread, PostgreSQL, Claude with tool use, two
-static HTML pages. Customers write on WhatsApp through Chatwoot, where Zolvion is the Agent Bot.
-Target architecture (queue, worker, Terraform): sibling repo `zolvion-restaurant`. Never
-copy code into it; don't bring its rules, states or architecture here unless Miguel asks.
+Zolvion Restaurant: WhatsApp ordering for restaurants, the product Miguel sells (not a demo:
+what is missing is added when a client needs it); launch city Ocaña (Norte de Santander).
+Caseritas Burger is a test restaurant, not a prospect. One FastAPI process with one worker
+thread, PostgreSQL, Claude with tool use, two static HTML pages. Customers write on WhatsApp
+through Chatwoot, where Zolvion is the Agent Bot. GitHub: `Miguel2219/zolvion-restaurant` (the
+local folder keeps its old name, `zolvion-demo`). An earlier queue/AWS design was dropped.
 
-Comments cite design docs (`order-modification.md`, `notifications-and-followups.md`,
-`payments.md`, "R3"/"R9", "Invariant 6") and Task C decision labels (Q1–Q3, D3). The
-design docs live in `zolvion-restaurant`; don't search for them. `docs/rules.md` §4 says
+Comments cite that old design's docs (`order-modification.md`, `notifications-and-followups.md`,
+`payments.md`, "R3"/"R9", "Invariant 6") and Task C decision labels (Q1–Q3, D3). Those
+docs no longer exist; don't search for them. `docs/rules.md` §4 says
 what each label means here. `docs/payments.md` is this repo's own payment doc.
 
 Code, comments, identifiers and docs are English. Everything a customer or staff member
@@ -30,21 +30,19 @@ PostgreSQL 17 runs as the Windows service `postgresql-x64-17` (setup: `docs/BUIL
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
-python -m pytest tests -q                                   # 356 pass, 1 xfail (G16)
-python -m pytest tests -q -k wrong_amount                   # by name
+python -m pytest tests -q                                   # 494 pass, 1 xfail (G16)
 python -m pytest tests/test_flow.py::test_happy_path_pickup # one test
 ```
 
 Pages: `/kitchen` (staff board, also `/`), `/reports`; no simulator since Task D: test with a
 phone (`docs/CHATWOOT-SETUP.md`). `/kitchen?alert=20` fires the unaccepted-order alert at 20 s.
 
-- `POST /api/reset` ("Reiniciar demo") wipes **every** table, photos included, and the chat
-  history. `POST /api/reload-config` only rebinds `brain.CATALOG` (`cart`, `payments`, `reports`
-  keep theirs): restart uvicorn to change prices.
+- `POST /api/reset` ("Reiniciar demo") wipes **every** table, photos included, and the chat history.
+  `POST /api/reload-config` only rebinds `brain.CATALOG`: restart uvicorn to change config.
 - `.env` is read once, at import, by `app/__init__.py`. All four `CHATWOOT_*` = Chatwoot mode
   (Meta's `/webhook` answers 404); none = Meta directly, or FAKE mode with `WHATSAPP_TOKEN`
   empty (replies only go to `outbound_messages`: the tests); some = every webhook refused.
-  `MESSAGE_WAIT_SECONDS` (4), `RESTAURANT_CONFIG` and `DATABASE_URL` are optional.
+  Optional: `MESSAGE_WAIT_SECONDS` (6), `ELEVENLABS_API_KEY` (voice), `RESTAURANT_CONFIG`, `DATABASE_URL`.
 - Manual tests: `TEST.md` and the Notion "Task X Plan" checklists; `run.md`: setup + demo day.
 
 ## Architecture
@@ -53,10 +51,10 @@ phone (`docs/CHATWOOT-SETUP.md`). `/kitchen?alert=20` fires the unaccepted-order
 POST /chatwoot/webhook (Agent Bot, signed) ─┬─> inbound_messages RECEIVED, 200 at once
 POST /webhook (Meta; only without Chatwoot) ┘   (status events -> conversations.chatwoot_status)
 worker.py thread, every 0.5 s: one phone whose newest message is MESSAGE_WAIT_SECONDS old
-   a person has the conversation ──> HUMAN (a photo is still checked: private note to staff)
-   consecutive texts, one turn ────> main.handle ─> brain.reply() ─ Claude + tools
-   each photo, order active ───────> brain.extract_proof() (OCR only) → payments.check_proof()
-                                     (code gives the verdict) → brain.reply() with an instruction
+   a person has the conversation ──> HUMAN (a pin is kept; a receipt still gets a staff note)
+   consecutive texts + voice notes > main.handle ─> brain.reply() (a clear note = customer text)
+   each photo/sticker, live order ─> brain.extract_proof() (OCR + is_receipt only) → a receipt:
+                                     payments.check_proof() gives the verdict; else the bot sees it
    status read again: still Pending → wa.send_text() (Chatwoot | Meta | FAKE), else SUPPRESSED
 ```
 
@@ -65,20 +63,21 @@ worker.py thread, every 0.5 s: one phone whose newest message is MESSAGE_WAIT_SE
 | `__init__.py` | loads `.env` before any module reads `os.environ` |
 | `money.py` | `pesos()`, `total_of()`, `fmt()`; money is `int` COP, never float |
 | `catalog.py` | `CATALOG` from `config/restaurant.json`: prices, modifiers, zones, accounts, `owns_account`, `timezone()` |
+| `transcribe.py` | voice notes → text: ElevenLabs Scribe v2 (`ELEVENLABS_API_KEY`), menu keyterms; code decides `clear` |
 | `db.py` | PostgreSQL schema (`init()`: `SCHEMA` + idempotent `UPGRADE`), one autocommit psycopg connection per thread, `run()/q()/q1()/insert()`, `transaction()`, `write_lock`, `IntegrityError`; `DATABASE_URL` fixed at import |
 | `chatwoot.py` | settings, `verify`, `classify`, `parse_customer`, `remember`/`bot_holds` (who has each phone), `send`/`set_status`, `download` |
 | `cart.py` | cart mutations; identical lines merge; `LineChoiceNeeded`; `summary()` is the only producer of a total |
-| `orders.py` | `TRANSITIONS`, modification windows, `amend()`, `board()`, `live_states()` |
+| `orders.py` | `TRANSITIONS`, modification windows, `amend()`/`apply_target()`, `state_token()`, `attach_location()`, `board()`, `live_states()` |
+| `changes.py` | Task E: a customer's change after acceptance (`change_requests`): `propose`, AUTO `apply_auto`, staff `accept`/`reject` (revision-guarded), `close_for_order` |
 | `payments.py` | `set_method`, `check_proof`, `confirm_receipt`/`discard_receipt`/`register_cash`/`discard_cash` (human only), `follow_total`, `current()` (the only money math) |
 | `handoff.py` | `request`/`resolve`/`close_for_phone`/`open_for`: the amber "Necesita a una persona" box |
-| `wa.py` | `send_text` (the single exit: Chatwoot, Meta or FAKE), `record`, Meta signature, `parse_webhook` |
-| `brain.py` | `SYSTEM`, `TOOLS`, `_run_tool`, per-phone history, ESTADO REAL block, payment sentence and `_finish_turn`, `extract_proof` |
+| `wa.py` | `send_text` (the single exit: Chatwoot, Meta or FAKE); `queue`/`send_queued` (a notice saved with its change, sent after the commit); `record`, Meta signature, `parse_webhook` |
+| `brain.py` | `SYSTEM`, `TOOLS`, `_run_tool`, per-phone history (`_start_fresh`: G43), ESTADO REAL block, payment sentence and `_finish_turn`, `order_message`, `extract_proof`/`is_receipt` |
 | `reports.py` | SQL aggregates, payments via `current()`; "today" = calendar day in `America/Bogota` |
-| `worker.py` | the thread that answers: `run_once` (grouping, who answers), `recover`, `sync_chatwoot`, catch-up note |
-| `main.py` | routes, `handle()`, `receive_receipt()`, `notify()`, `_stop_message`, `_discard_message`; `db.init()` at import |
+| `worker.py` | the thread that answers: `run_once` (grouping, who answers, pins, queued notices), `recover`, `sync_chatwoot`, catch-up note |
+| `main.py` | routes (Editar, accept/reject, notices), `handle()`, `receive_receipt()`, `quote_note()` (a quoted message, never read for payment words), `notify()`, `_stop_message`, `_discard_message`; `db.init()` at import |
 
-`static/` pages poll the JSON API (kitchen 2 s, reports 4 s). Kitchen
-buttons send event names from `orders.TRANSITIONS`. Routes and tables: `docs/ARCHITECTURE.md`.
+Pages poll the API (kitchen 2 s, reports 4 s); routes, tables, stickers: `docs/ARCHITECTURE.md`.
 
 ## Rules the code is built around (`docs/rules.md`)
 
@@ -90,12 +89,12 @@ buttons send event names from `orders.TRANSITIONS`. Routes and tables: `docs/ARC
 3. **Customer messages never contain the order code (`P-1234`) or the word "cocina".** Tests
    assert it; `SYSTEM` forbids it; every bot reply is cleaned in code (`main._clean_for_customer`:
    codes removed, "cocina" → "el local"); discard keeps its own template guard.
-4. **Uniqueness lives in the database.** `inbound_messages.wa_message_id` is the PK;
-   `payment_receipts.reference` (a discarded receipt keeps it) and `outbound_messages.
-   chatwoot_message_id` have unique partial indexes; code reacts after the `IntegrityError`.
-   A failed `db.run()` leaves nothing; `db.transaction()` groups writes that land together
-   (`orders.amend`, `_store_receipt`, `register_cash`, `discard_cash`, `confirm_receipt`). Never call
-   `check_proof` inside a transaction: it catches the `IntegrityError`.
+4. **Uniqueness lives in the database.** `inbound_messages.wa_message_id` is the PK; unique
+   partial indexes: `payment_receipts.reference` (a discarded receipt keeps it), `outbound_messages.
+   chatwoot_message_id`, one open `change_requests` row per order; code reacts to `IntegrityError`.
+   A failed `db.run()` leaves nothing; `db.transaction()` groups writes that land together (`amend`,
+   `apply_target` with its request and queued notice, `_store_receipt`, `register_cash`, `discard_cash`,
+   `confirm_receipt`). Never call `check_proof` inside a transaction: it catches the `IntegrityError`.
 5. **Vocabulary:** "aceptado por el local" is the only phrase for `ACCEPTED` and later. A
    `CONFIRMED` order is confirmed by the customer, never "recibido" or "enviado al local".
 
@@ -106,7 +105,7 @@ buttons send event names from `orders.TRANSITIONS`. Routes and tables: `docs/ARC
   `push_status`). `remember` ignores older events and conversation ids. Notifications always go.
 - Handoff box: `OPENING`, then (after the bot's reply) private note + `open` = `OPEN`, retried
   every 30 s («Chatwoot sin actualizar»). "Ya lo atendí" sets Pending first (502 on failure);
-  Pending/resolved in Chatwoot closes it. A `webp` image is a sticker, never a receipt.
+  Pending/resolved in Chatwoot closes it. A `webp` image is a sticker: `main._sticker` (Task E).
 
 ## Orders (`docs/ORDER-LIFECYCLE.md`)
 
@@ -119,18 +118,21 @@ Modification windows (`orders.modification_window`, enforced by `brain._edit` be
 - **1** an OPEN cart exists: it always wins.
 - **2** latest order `PENDING_CONFIRMATION`/`CONFIRMED`: `orders.amend` edits IN PLACE (same
   row, code, card) inside one `db.transaction()`, `payments.follow_total` included.
-- **3** latest order `ACCEPTED..OUT_FOR_DELIVERY`: locked; `_handoff` opens the amber box with a
-  code-written summary. `start_separate_order` opens a cart with `related_order_id` (informational).
+- **3** latest order `ACCEPTED..OUT_FOR_DELIVERY`: `_propose` stores a `changes.py` proposal; AUTO
+  (`add_after_accept` items added while ACCEPTED) applies on the customer's «sí» (`confirm_change`),
+  anything else waits on the card for staff to accept or reject the `revision` they saw. Panel
+  **Editar**: any card, preview then save with its `state_token`. `start_separate_order`: `related_order_id`.
 
 `request_handoff` is gated in code by `topic`: `ORDER_CHANGE`, `CANCEL`, `PAYMENT_METHOD`,
 `ORDER_INFO` answer `NO SE PUDO` naming the tool to use, as do a missing topic or `summary`.
 Only `OTHER` opens a box, on `orders.latest_for(phone, ON_BOARD)`; no card → `NO SE PUDO`, no
 promise. A customer who asks for a person without a reason is asked the reason once (`SYSTEM`).
 
-Notifications (`main.notify`): `ACCEPTED`, `READY` (pickup only) and `OUT_FOR_DELIVERY`
-send fixed `NOTIFY` texts. `REJECTED` and staff `CANCELLED` send a model-written message
-from the staff's reason (`_stop_message`, template fallback). `COMPLETED` and customer
-`CANCELLED` (`orders.last_actor`) send nothing.
+Notifications (`main.notify`): fixed `NOTIFY` texts on `ACCEPTED`, `READY` (pickup), `OUT_FOR_DELIVERY`;
+staff `REJECTED`/`CANCELLED` a model message from the reason (`_stop_message`, template fallback); none
+on `COMPLETED`/customer `CANCELLED`. Task E notices are code-built, queued in the change's transaction.
+Prep time: Aceptar's `minutes` → `orders.ready_by`; the customer gets «aproximadamente X minutos»
+(`minutes_text`, never a clock), Cambiar tiempo (`/ready_by`) a queued notice; ESTADO REAL: what is left.
 
 ## Payments (`docs/payments.md`)
 
@@ -140,33 +142,31 @@ from the staff's reason (`_stop_message`, template fallback). `COMPLETED` and cu
   `CONFIRMED`, `DISCARDED` (last two final); order status = worst receipt, discarded ignored, none =
   `PENDING`. **One `cash_payments` row per registration** (`RECEIVED`/`DISCARDED`). "Pagos" lists
   both, oldest first; a discarded row leaves the card and counts nowhere (ESTADO REAL names it).
-- Expected amount and checks (`_expected_for_new_receipt`, `_expectation`): `docs/payments.md`
-  §3. Registered cash comes off first; all paid → red "No se esperaba otro pago."
-- Repeated reference: same order and amount = resend (no row; a discarded one returns
-  `resent_discard_reason` and the bot gives the reason again); anything else is a red row
-  "Este comprobante ya fue usado antes (referencia X)", stored without the reference.
+- Expected amount and checks: `docs/payments.md` §3; registered cash comes off first; all paid → red.
+- Repeated reference: same order and amount = resend (no row; a discarded one gives its reason
+  again); else a red row «… ya fue usado antes (referencia X)»; none: amount + minute (`_earlier_copy`).
+- An image only becomes a receipt row if the reader does not say `is_receipt: false` (Task E).
 - Human only: `confirm_receipt` (refuses 0; sets the method only on `UNSPECIFIED`/`CASH`);
   `discard_receipt(reason)` (one guarded `_discard_message`); `register_cash` (≤ `outstanding`;
   `UNSPECIFIED` → `CASH` with `method_from_cash`); `discard_cash(reason)` (nobody is told; the
   last cash row takes back a method only cash set). Any other method write clears the flag.
-- `current()`: `cash` rows, `cash_received`, `sent`, `transfer_due`, `cash_due`, `to_pay` (their
-  sum), `paid` (capped), `outstanding`, `confirmed`, `received` (uncapped, Reportes),
-  `overpayment_amount`, `confirmed_overpayment`, `unconfirmed_amount`, `status`, `under_review`.
-- `choose_payment` goes to a person once a receipt arrived, cash was registered or the order is
-  out for delivery; repeating the current method answers "no cambió nada".
+- `current()`: `cash` rows, `cash_received`, `sent`, `transfer_due`, `cash_due`, `to_pay`, `paid`
+  (capped), `outstanding`, `confirmed`, `received`, overpayments, `unconfirmed_amount`, `status`.
+- `choose_payment` goes to a person when `method_lock_reason` says so (a receipt, cash, en camino);
+  a change that undoes a MIXED split asks the method only without that lock, else «Acordar pago».
 
 ## Conversation state (`brain.py`)
 
 - History is in memory, per phone, last `HISTORY_TURNS` (24), never splitting a `tool_use`/
-  `tool_result` pair, restored on any exception. A restart forgets it; orders stay in PostgreSQL.
+  `tool_result` pair, restored on any exception, cleared once after a finished order (G43).
 - One global lock serializes turns (`extract_proof` runs outside it). `db.write_lock` is held
   by each tool call, receipt store, webhook and panel write, never around a model or Chatwoot
   call; panel routes send in a thread. `orders.amend` keeps its guarded `UPDATE … WHERE state`.
-- Only the last round's text reaches the customer. If the model still wants tools after
-  `MAX_TOOL_ROUNDS` (8), one last call with `tool_choice` none answers; only its text is sent.
+- Only the last round's text reaches the customer (an open `_propose` proposal: exactly code's
+  text). Still wanting tools after `MAX_TOOL_ROUNDS` (8): one `tool_choice` none call answers.
 - `system_prompt(phone)` appends `ESTADO REAL AHORA` on every model call: the live orders'
-  states plus one "Pago del pedido más reciente" line (`_payment_state`, no amounts) and
-  `PAYMENT_RULES`. It wins over the chat history. No codes or totals in it.
+  states, the change lines (`_change_state`), one "Pago del pedido más reciente" line
+  (`_payment_state`, no amounts) and `PAYMENT_RULES`. It wins over the history. No codes or totals.
 - **Payment sentence** (`payment_sentence`, from `current()`): edits, `choose_payment`, `order_status`
   and the clean-receipt instruction hand it out to copy verbatim; payment words force `order_status`
   first. `_finish_turn` checks every payment reply: a missing sentence is appended; a contradiction,
@@ -183,13 +183,13 @@ the model, often a bracketed instruction (`(… No le menciones ningún código.
 failures as `NO SE PUDO: …` instead of raising. A change to what was ordered goes through `_edit`;
 a done action records its confirmation with `_action`; a payment change uses `_hand_out_sentence`.
 
-## Tests (`test_flow.py`; R1–R12 in `test_review_bugs.py`; Chatwoot in `test_chatwoot.py`)
+## Tests (`test_flow.py`; R1–R12 `test_review_bugs.py`; Chatwoot `test_chatwoot.py`; Task E `test_task_e.py`)
 
 - `tests/conftest.py` points `DATABASE_URL` at `<name>_test` on the same server before `app`
   is imported (it is fixed at import) and creates that database. PostgreSQL must be running.
 - Expected numbers come from `config/restaurant.json`; changing a price moves tests on purpose.
 - No model calls. `notify()` runs in FAKE mode, read back from `outbound_messages`; tables reset
-  between tests. conftest blanks `CHATWOOT_*`; `test_chatwoot.py` fakes `chatwoot._request` and
+  between tests. conftest blanks `CHATWOOT_*` and `ELEVENLABS_API_KEY`; `test_chatwoot.py` fakes `chatwoot._request` and
   replays `tests/fixtures/chatwoot/` (sanitized step 0 recordings) through `worker.run_once()`.
 
 ## Config is the product

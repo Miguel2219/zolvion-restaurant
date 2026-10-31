@@ -52,6 +52,12 @@ class Catalog:
         item = self._items.get(item_id)
         return bool(item and item.get("available", True))
 
+    def can_add_after_accept(self, item_id: str) -> bool:
+        """Task E: the restaurant lets this product be added on its own after accepting
+        an order (a drink, nothing to prepare). Off unless the menu says so."""
+        item = self._items.get(item_id)
+        return bool(item and item.get("add_after_accept", False) is True)
+
     def modifier(self, modifier_id: str):
         return self._modifiers.get(modifier_id)
 
@@ -84,6 +90,10 @@ class Catalog:
                 if target in _fold(zone["name"]) or _fold(zone["name"]) in target:
                     return int(zone["fee"]), zone["name"]
         return int(self.fulfilment.get("default_delivery_fee", 0)), None
+
+    def prep_minutes(self) -> list[int]:
+        """The choices staff get on Aceptar, in minutes."""
+        return [int(m) for m in self.fulfilment.get("prep_minutes", [15, 20, 30, 45])]
 
     def prices(self) -> set[int]:
         """Every amount the menu and the delivery table produce on their own: item and
@@ -129,6 +139,24 @@ class Catalog:
             prefix = "".join(ch for ch in text[:mask_at[0]] if ch.isdigit())
             suffix = "".join(ch for ch in text[mask_at[-1] + 1:] if ch.isdigit())
             if prefix and suffix and mine.startswith(prefix) and mine.endswith(suffix):
+                return True
+        return False
+
+    def may_own_account(self, number: str | None) -> bool:
+        """A masked number that shows too little for owns_account (Bancolombia's
+        *****7389, or a prefix only) but does not contradict one of our accounts.
+        Never enough on its own: check_proof also needs the holder name."""
+        text = str(number or "")
+        mask_at = [i for i, ch in enumerate(text) if ch in MASK_CHARS]
+        if not mask_at:
+            return False
+        prefix = "".join(ch for ch in text[:mask_at[0]] if ch.isdigit())
+        suffix = "".join(ch for ch in text[mask_at[-1] + 1:] if ch.isdigit())
+        if not prefix and not suffix:
+            return False
+        for account in self.accounts():
+            mine = "".join(ch for ch in str(account["number"]) if ch.isdigit())
+            if mine.startswith(prefix) and mine.endswith(suffix):
                 return True
         return False
 

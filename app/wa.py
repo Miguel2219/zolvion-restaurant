@@ -59,10 +59,12 @@ def record(phone: str, body: str, status: str, conversation_id: int | None = Non
     )
 
 
-def _settle(row_id: int, status: str, error: str | None = None, message_id: int | None = None) -> None:
+def _settle(row_id: int, status: str, error: str | None = None, message_id: int | None = None,
+            wa_message_id: str | None = None) -> None:
     db.run(
-        "UPDATE outbound_messages SET status=%s, error=%s, chatwoot_message_id=%s WHERE id=%s",
-        (status, error, message_id, row_id),
+        "UPDATE outbound_messages SET status=%s, error=%s, chatwoot_message_id=%s,"
+        " wa_message_id=%s WHERE id=%s",
+        (status, error, message_id, wa_message_id, row_id),
     )
 
 
@@ -74,7 +76,96 @@ def send_text(phone: str, body: str, conversation_id: int | None = None) -> bool
         return False
     if chatwoot.enabled():
         conversation_id = conversation_id or chatwoot.conversation_for(phone)
-        row_id = record(phone, body, "SENDING", conversation_id)
+        return _send_row(record(phone, body, "SENDING", conversation_id), phone, body,
+                         conversation_id)
+    if not live():
+        record(phone, body, "FAKE")
+        return True
+    return _send_row(record(phone, body, "SENDING"), phone, body, None)
+
+
+# ---- Task E: notices queued with the change they report ----------------------
+#
+# A message that tells the customer how their order changed is written in the same
+# transaction as the change (queue) and sent only after the commit (send_queued): a
+# change can never be saved without its message, and a crash in between leaves a
+# QUEUED row the worker sends. A FAILED one, or one SENDING for too long (the result
+# is unknown), is listed on the panel for a person to resend.
+
+MAX_NOTICE = 3900          # send_text cuts at 4000; a cut message could lose its total
+TOO_LONG = "El mensaje para el cliente quedaría demasiado largo. Acorte las notas o junte líneas."
+STUCK_SECONDS = 120
+
+
+class TooLong(Exception):
+    pass
+
+
+def queue(phone: str, body: str, order_id: int, kind: str) -> int:
+    """A QUEUED notice, inside the caller's transaction (no network). kind ORDER_STATE
+    (how the order is now) makes that order's older unsent ORDER_STATE notices
+    SUPERSEDED: only the latest state goes out. kind FIXED: a template."""
+    if len(body) > MAX_NOTICE:
+        raise TooLong(TOO_LONG)
+    if kind == "ORDER_STATE":
+        db.run(
+            "UPDATE outbound_messages SET status='SUPERSEDED' WHERE order_id=%s"
+            " AND notice_kind='ORDER_STATE' AND status IN ('QUEUED','FAILED')",
+            (order_id,),
+        )
+    return db.insert(
+        "INSERT INTO outbound_messages(phone, body, kind, status, sent_at, order_id, notice_kind)"
+        " VALUES(%s,%s,'text','QUEUED',%s,%s,%s) RETURNING id",
+        (phone, body, db.now(), order_id, kind),
+    )
+
+
+def send_queued(row_id: int) -> bool:
+    """Claims a QUEUED notice and sends it once: two callers can never both send it.
+    Never call it under db.write_lock or inside a transaction (it talks to the network)."""
+    row = db.q1(
+        "UPDATE outbound_messages SET status='SENDING', sent_at=%s WHERE id=%s AND status='QUEUED'"
+        " RETURNING phone, body",
+        (db.now(), row_id),
+    )
+    if row is None:
+        return False
+    if chatwoot.enabled():
+        conversation_id = chatwoot.conversation_for(row["phone"])
+        db.run("UPDATE outbound_messages SET conversation_id=%s WHERE id=%s", (conversation_id, row_id))
+        return _send_row(row_id, row["phone"], row["body"], conversation_id)
+    if not live():
+        _settle(row_id, "FAKE")
+        return True
+    return _send_row(row_id, row["phone"], row["body"], None)
+
+
+def send_queued_for(phone: str | None = None, older_than: str | None = None) -> int:
+    """Sends the QUEUED notices of one phone (the worker, after a turn), or the ones
+    queued before `older_than` (left by a crash after the commit). How many went out."""
+    sql, args = "SELECT id FROM outbound_messages WHERE status='QUEUED'", []
+    if phone is not None:
+        sql, args = sql + " AND phone=%s", [*args, phone]
+    if older_than is not None:
+        sql, args = sql + " AND sent_at <= %s", [*args, older_than]
+    return sum(send_queued(row["id"]) for row in db.q(sql + " ORDER BY id", args))
+
+
+def stuck_notices(stuck_before: str) -> list[dict]:
+    """Notices that did not reach the customer: FAILED, or SENDING since before
+    `stuck_before` (the send's result is unknown), for any order, on the board or not."""
+    return [dict(row) for row in db.q(
+        "SELECT m.id, m.phone, m.body, m.status, m.sent_at, m.order_id, m.notice_kind, m.error,"
+        " o.code FROM outbound_messages m LEFT JOIN orders o ON o.id = m.order_id"
+        " WHERE m.notice_kind IS NOT NULL AND (m.status='FAILED'"
+        " OR (m.status='SENDING' AND m.sent_at < %s)) ORDER BY m.id",
+        (stuck_before,),
+    )]
+
+
+def _send_row(row_id: int, phone: str, body: str, conversation_id: int | None) -> bool:
+    """The network part of a recorded row: Chatwoot when configured, else Meta."""
+    if chatwoot.enabled():
         if conversation_id is None:
             _settle(row_id, "FAILED", "Este número no tiene conversación en Chatwoot.")
             return False
@@ -85,10 +176,6 @@ def send_text(phone: str, body: str, conversation_id: int | None = None) -> bool
             return False
         _settle(row_id, "SENT", message_id=message_id)
         return True
-    if not live():
-        record(phone, body, "FAKE")
-        return True
-    row_id = record(phone, body, "SENDING")
     payload = {
         "messaging_product": "whatsapp",
         "to": phone,
@@ -105,7 +192,13 @@ def send_text(phone: str, body: str, conversation_id: int | None = None) -> bool
         if response.status_code >= 300:
             _settle(row_id, "FAILED", response.text[:400])
             return False
-        _settle(row_id, "SENT")
+        # Graph's wamid for it (messages[0].id, as Chatwoot reads it): a customer's reply
+        # that quotes this message names it in context.id. An odd body still means sent.
+        try:
+            wamid = response.json()["messages"][0]["id"]
+        except (ValueError, KeyError, IndexError, TypeError):
+            wamid = None
+        _settle(row_id, "SENT", wa_message_id=wamid)
         return True
     except Exception as exc:  # noqa: BLE001
         _settle(row_id, "FAILED", str(exc)[:400])
@@ -152,6 +245,7 @@ def parse_webhook(payload: dict) -> list[dict]:
             }
             for message in value.get("messages", []):
                 phone = message.get("from")
+                quoted = (message.get("context") or {}).get("id")   # a reply that quotes one
                 item = {
                     "wa_message_id": message.get("id"),
                     "phone": phone,
@@ -160,12 +254,17 @@ def parse_webhook(payload: dict) -> list[dict]:
                     "text": None,
                     "media_id": None,
                     "location": None,
+                    "reply_to": {"id": quoted} if quoted else None,
                 }
                 if message.get("type") == "text":
                     item["text"] = message.get("text", {}).get("body")
                 elif message.get("type") == "image":
                     item["media_id"] = message.get("image", {}).get("id")
                     item["text"] = message.get("image", {}).get("caption")
+                elif message.get("type") == "sticker":
+                    item["media_id"] = message.get("sticker", {}).get("id")
+                elif message.get("type") == "audio":
+                    item["media_id"] = message.get("audio", {}).get("id")
                 elif message.get("type") == "location":
                     item["location"] = message.get("location") or {}
                 elif message.get("type") == "interactive":
